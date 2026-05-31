@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Flusso doc_kb — Sequence Diagram</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #f8f9fa; display: flex; flex-direction: column; align-items: center; padding: 32px; }
+    h1 { font-size: 1.3rem; color: #333; margin-bottom: 24px; }
+    #diagram { background: white; border-radius: 12px; padding: 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); max-width: 1100px; width: 100%; }
+    .btn-bar { margin-top: 20px; display: flex; gap: 12px; }
+    button { padding: 10px 22px; border: none; border-radius: 8px; cursor: pointer; font-size: 0.95rem; font-weight: 600; }
+    .btn-svg { background: #4f46e5; color: white; }
+    .btn-png { background: #0ea5e9; color: white; }
+    button:hover { opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <h1>Flusso doc_kb — Sequence Diagram</h1>
+  <div id="diagram">
+    <div class="mermaid">
+sequenceDiagram
+    participant UI as LibreChat Frontend
+    participant API as LibreChat API
+    participant GW as agents-gateway
+    participant CLASS as Classifier Agent
+    participant OAI as OpenAI API
+    participant DOC as doc_kb Agent
+
+    Note over UI,DOC: ROUND 1 — Classificazione e richiesta ricerca
+
+    UI->>API: "Cosa dice il manuale sul motore?"
+    API->>GW: POST /v1/chat/completions<br/>{messages: [...], stream: true}
+
+    GW->>CLASS: normalize_messages(history)<br/>+ user message
+    CLASS->>OAI: Responses API → gpt-5-mini
+    OAI-->>CLASS: route="doc_kb"
+    CLASS-->>GW: route=doc_kb, rewritten_query="..."
+
+    Note over GW: Nessuna chiamata al doc_kb agent.<br/>Emette direttamente tool_call fittizio.
+
+    GW-->>API: streaming SSE chunks:<br/>tool_calls[0] = {type:"file_search",<br/>query: rewritten_query}
+    API-->>UI: mostra "searching..."
+
+    Note over UI,DOC: ROUND 2 — LibreChat esegue la ricerca e torna
+
+    API->>API: Esegue file_search interno<br/>(vector store LibreChat)
+    API->>GW: POST /v1/chat/completions<br/>{messages: [...,<br/>  {role:"assistant", tool_calls:[...]},<br/>  {role:"tool", content: risultati_documenti}]}
+
+    GW->>GW: _has_tool_message()<br/>→ true (ultimo msg è role:tool)
+    GW->>GW: _build_round2_input()<br/>estrae risultati dal tool message
+
+    GW->>DOC: Runner.run_streamed(doc_kb_agent,<br/>input=[contesto_documenti + domanda])
+    DOC->>OAI: Responses API → gpt-5-mini<br/>+ istruzioni "max 3 frasi, no follow-up"
+    OAI-->>DOC: risposta sintetizzata
+    DOC-->>GW: stream delta chunks
+    GW-->>API: SSE text chunks
+    API-->>UI: risposta finale
+    </div>
+  </div>
+  <div class="btn-bar">
+    <button class="btn-svg" onclick="downloadSVG()">⬇ Scarica SVG</button>
+    <button class="btn-png" onclick="downloadPNG()">⬇ Scarica PNG</button>
+  </div>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'default', sequence: { useMaxWidth: false } });
+
+    function getSVGEl() {
+      return document.querySelector('#diagram svg');
+    }
+
+    function downloadSVG() {
+      const svg = getSVGEl();
+      if (!svg) return alert('Diagramma non ancora renderizzato.');
+      const blob = new Blob([svg.outerHTML], { type: 'image/svg+xml' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = '03_flusso_doc_kb.svg';
+      a.click();
+    }
+
+    function downloadPNG() {
+      const svg = getSVGEl();
+      if (!svg) return alert('Diagramma non ancora renderizzato.');
+      const svgData = new XMLSerializer().serializeToString(svg);
+      const canvas = document.createElement('canvas');
+      const rect = svg.getBoundingClientRect();
+      const scale = 2;
+      canvas.width = rect.width * scale;
+      canvas.height = rect.height * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/png');
+        a.download = '03_flusso_doc_kb.png';
+        a.click();
+      };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgData);
+    }
+  </script>
+</body>
+</html>

@@ -34,6 +34,12 @@ Rules:
 - Do NOT suggest uploading more documents or taking further actions.
 - Do NOT offer alternatives or additional options.
 - No markdown headings. Use bullet points only if listing two or more distinct items.
+
+Images:
+- The context chunks may contain markdown image references inline, e.g. ![alt](/images/...).
+- When present, copy those references VERBATIM into your response at the point where they are relevant.
+- Do NOT alter, omit, or paraphrase image references — output the exact markdown syntax.
+- If multiple images are listed, include all of them.
 """
 
 _doc_agent = Agent(

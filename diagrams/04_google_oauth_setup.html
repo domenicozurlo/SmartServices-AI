@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Procedura Setup Credenziali Google Calendar</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 40px 20px; color: #1a1a2e; }
+    .page { max-width: 860px; margin: 0 auto; background: white; border-radius: 16px; padding: 52px 60px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .header { border-bottom: 3px solid #4f46e5; padding-bottom: 24px; margin-bottom: 36px; }
+    .header h1 { font-size: 1.7rem; color: #1e1b4b; }
+    .header .subtitle { margin-top: 6px; color: #6b7280; font-size: 0.95rem; }
+    .header .meta { margin-top: 14px; display: flex; gap: 24px; font-size: 0.85rem; color: #9ca3af; }
+    .meta span { display: flex; align-items: center; gap: 5px; }
+
+    h2 { font-size: 1.15rem; color: #1e1b4b; margin: 36px 0 14px; padding-left: 12px; border-left: 4px solid #4f46e5; }
+    h3 { font-size: 0.98rem; color: #374151; margin: 20px 0 8px; font-weight: 600; }
+    p { line-height: 1.7; color: #374151; margin-bottom: 10px; font-size: 0.95rem; }
+
+    ol, ul { padding-left: 22px; margin-bottom: 10px; }
+    li { line-height: 1.8; font-size: 0.95rem; color: #374151; }
+
+    code { background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 4px; padding: 1px 6px; font-size: 0.88rem; font-family: 'Consolas', monospace; color: #7c3aed; }
+    pre { background: #1e1b4b; color: #e2e8f0; border-radius: 8px; padding: 18px 22px; font-size: 0.88rem; font-family: 'Consolas', monospace; line-height: 1.6; overflow-x: auto; margin: 12px 0 16px; }
+    pre .comment { color: #6b7280; }
+    pre .key { color: #93c5fd; }
+    pre .val { color: #86efac; }
+    pre .url { color: #fcd34d; }
+
+    .callout { border-radius: 8px; padding: 14px 18px; margin: 14px 0; font-size: 0.92rem; line-height: 1.6; }
+    .callout.info  { background: #eff6ff; border-left: 4px solid #3b82f6; color: #1e40af; }
+    .callout.warn  { background: #fffbeb; border-left: 4px solid #f59e0b; color: #92400e; }
+    .callout.ok    { background: #f0fdf4; border-left: 4px solid #22c55e; color: #14532d; }
+    .callout.error { background: #fef2f2; border-left: 4px solid #ef4444; color: #7f1d1d; }
+
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.9rem; }
+    th { background: #f5f3ff; color: #1e1b4b; padding: 10px 14px; text-align: left; border: 1px solid #e5e7eb; }
+    td { padding: 9px 14px; border: 1px solid #e5e7eb; color: #374151; vertical-align: top; }
+    tr:nth-child(even) td { background: #fafafa; }
+
+    .step-badge { display: inline-block; background: #4f46e5; color: white; border-radius: 50%; width: 24px; height: 24px; font-size: 0.8rem; font-weight: 700; text-align: center; line-height: 24px; margin-right: 8px; }
+
+    .btn-print { position: fixed; bottom: 28px; right: 28px; background: #4f46e5; color: white; border: none; padding: 12px 22px; border-radius: 10px; cursor: pointer; font-size: 0.95rem; font-weight: 600; box-shadow: 0 4px 12px rgba(79,70,229,0.4); }
+    .btn-print:hover { background: #4338ca; }
+
+    hr { border: none; border-top: 1px solid #e5e7eb; margin: 32px 0; }
+    @media print { .btn-print { display: none; } body { background: white; } .page { box-shadow: none; } }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <div class="header">
+    <h1>Procedura Setup Credenziali Google Calendar</h1>
+    <p class="subtitle">Configurazione OAuth 2.0 per l'integrazione <strong>google-calendar-mcp</strong> in LibreChat</p>
+    <div class="meta">
+      <span>📅 Maggio 2026</span>
+      <span>🏗️ Progetto: LibreChat + agents-gateway</span>
+      <span>👤 dome.zurlo@gmail.com</span>
+    </div>
+  </div>
+
+  <!-- ===== PREREQUISITI ===== -->
+  <h2>1. Prerequisiti</h2>
+  <table>
+    <tr><th>Requisito</th><th>Dettaglio</th></tr>
+    <tr><td>Account Google</td><td>Account da usare per il calendario (<code>dome.zurlo@gmail.com</code>)</td></tr>
+    <tr><td>Google Cloud Project</td><td>Progetto con le API di Google Calendar abilitate</td></tr>
+    <tr><td>Docker</td><td>Docker Desktop attivo con i container LibreChat</td></tr>
+    <tr><td>File <code>google_token.json</code></td><td>Creato nella root del progetto (inizialmente <code>{}</code>)</td></tr>
+  </table>
+
+  <!-- ===== STEP 1 ===== -->
+  <h2>2. Creazione del Client OAuth 2.0 in Google Cloud Console</h2>
+
+  <h3><span class="step-badge">1</span>Abilita la Google Calendar API</h3>
+  <ol>
+    <li>Vai su <code>console.cloud.google.com</code></li>
+    <li>Seleziona (o crea) il progetto <strong>Calendar</strong></li>
+    <li>Menu → <strong>API e servizi → Libreria</strong></li>
+    <li>Cerca <strong>Google Calendar API</strong> → Abilita</li>
+  </ol>
+
+  <h3><span class="step-badge">2</span>Configura la schermata di consenso OAuth</h3>
+  <ol>
+    <li>Menu → <strong>API e servizi → Schermata consenso OAuth</strong></li>
+    <li>Tipo utente: <strong>Esterno</strong></li>
+    <li>Compila nome app, email supporto, email sviluppatore</li>
+    <li>Scope: aggiungi <code>https://www.googleapis.com/auth/calendar</code></li>
+    <li>Lascia lo stato in <strong>Testing</strong> (non serve pubblicare)</li>
+  </ol>
+
+  <div class="callout warn">
+    ⚠️ In modalità <strong>Testing</strong> solo gli utenti aggiunti come "Test users" possono completare il flusso OAuth.
+    Vai su <strong>Pubblico → Test users → + ADD USERS</strong> e aggiungi l'account Google che userà il calendario.
+  </div>
+
+  <h3><span class="step-badge">3</span>Crea le credenziali OAuth 2.0</h3>
+  <ol>
+    <li>Menu → <strong>API e servizi → Credenziali → + Crea credenziali → ID client OAuth 2.0</strong></li>
+    <li>Tipo applicazione: <strong>Applicazione web</strong> (non Desktop)</li>
+    <li>Nome: es. <code>google-calendar-mcp</code></li>
+    <li>Aggiungi URI di reindirizzamento autorizzato:
+      <pre>http://localhost:3000/auth/callback</pre>
+    </li>
+    <li>Salva → copia <strong>Client ID</strong> e <strong>Client secret</strong></li>
+  </ol>
+
+  <div class="callout info">
+    ℹ️ Il tipo <strong>Desktop</strong> non supporta redirect URI HTTP arbitrari — usare sempre <strong>Applicazione web</strong> per integrazioni server-side.
+  </div>
+
+  <!-- ===== STEP 2 ===== -->
+  <h2>3. Configurazione del progetto LibreChat</h2>
+
+  <h3><span class="step-badge">4</span>Variabili d'ambiente in <code>.env</code></h3>
+  <p>Aggiungi le seguenti variabili al file <code>.env</code> nella root del progetto:</p>
+  <pre><span class="comment"># Google Calendar OAuth 2.0</span>
+<span class="key">GOOGLE_CLIENT_ID</span>=<span class="val">689916846597-q3cgddj5nqk8bdvua66g2huucglstncv.apps.googleusercontent.com</span>
+<span class="key">GOOGLE_CLIENT_SECRET</span>=<span class="val">GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</span></pre>
+
+  <h3><span class="step-badge">5</span>File <code>google_token.json</code></h3>
+  <p>Crea il file nella root del progetto con contenuto vuoto:</p>
+  <pre><span class="val">{}</span></pre>
+  <p>Questo file verrà popolato automaticamente dopo il flusso OAuth e persiste tra i restart del container grazie al bind mount in <code>docker-compose.override.yml</code>:</p>
+  <pre><span class="key">volumes</span>:
+  - <span class="val">./google_token.json:/app/token.json</span></pre>
+
+  <!-- ===== STEP 3 ===== -->
+  <h2>4. Avvio dei container</h2>
+
+  <h3><span class="step-badge">6</span>Avvia lo stack completo</h3>
+  <pre>docker compose -f docker-compose.yml -f docker-compose.override.yml up -d</pre>
+
+  <p>Il container <code>google-calendar-mcp</code> sarà raggiungibile su <code>http://localhost:3000</code>.</p>
+
+  <div class="callout info">
+    ℹ️ Il container usa <code>npx -y google-calendar-mcp</code> — scarica automaticamente il pacchetto npm <strong>google-calendar-mcp v1.0.9</strong> al primo avvio.
+  </div>
+
+  <!-- ===== STEP 4 ===== -->
+  <h2>5. Completamento del flusso OAuth (una tantum)</h2>
+
+  <h3><span class="step-badge">7</span>Apri l'URL di autorizzazione nel browser</h3>
+  <p>Costruisci l'URL manualmente (il server MCP non espone un endpoint <code>/auth/url</code> HTTP) e aprilo nel browser:</p>
+  <pre><span class="url">https://accounts.google.com/o/oauth2/v2/auth</span>
+  ?client_id=<span class="val">TUO_CLIENT_ID</span>
+  &amp;redirect_uri=<span class="val">http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fcallback</span>
+  &amp;response_type=<span class="val">code</span>
+  &amp;scope=<span class="val">https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar</span>
+  &amp;access_type=<span class="val">offline</span>
+  &amp;prompt=<span class="val">consent</span></pre>
+
+  <div class="callout warn">
+    ⚠️ <code>access_type=offline</code> è necessario per ottenere il <strong>refresh_token</strong>, indispensabile per rinnovare l'accesso senza ripetere il flusso OAuth.<br/>
+    <code>prompt=consent</code> forza la richiesta del refresh_token anche se l'utente ha già autorizzato in precedenza.
+  </div>
+
+  <h3><span class="step-badge">8</span>Autorizza l'accesso su Google</h3>
+  <ol>
+    <li>Google mostra la schermata di consenso</li>
+    <li>Seleziona l'account <code>dome.zurlo@gmail.com</code></li>
+    <li>Clicca <strong>Continua</strong> → <strong>Consenti</strong></li>
+    <li>Il browser viene reindirizzato su <code>http://localhost:3000/auth/callback?code=...</code></li>
+    <li>Il server MCP intercetta la callback, scambia il code con i token e li scrive in <code>/app/token.json</code></li>
+  </ol>
+
+  <h3><span class="step-badge">9</span>Verifica il token salvato</h3>
+  <p>Il file <code>google_token.json</code> nella root del progetto deve essere popolato con una struttura simile:</p>
+  <pre>{
+  <span class="key">"access_token"</span>:  <span class="val">"ya29.a0AQvP..."</span>,
+  <span class="key">"refresh_token"</span>: <span class="val">"1//03LGL8..."</span>,
+  <span class="key">"scope"</span>:         <span class="val">"https://www.googleapis.com/auth/calendar"</span>,
+  <span class="key">"token_type"</span>:    <span class="val">"Bearer"</span>,
+  <span class="key">"expiry_date"</span>:   <span class="val">1780247110891</span>
+}</pre>
+
+  <div class="callout ok">
+    ✅ Se il file è popolato il flusso OAuth è completato. Il refresh_token consente di rinnovare automaticamente l'accesso — non è necessario ripetere la procedura.
+  </div>
+
+  <!-- ===== ARCHITETTURA ===== -->
+  <h2>6. Come funziona il container google-calendar-mcp</h2>
+
+  <table>
+    <tr><th>Endpoint</th><th>Metodo</th><th>Descrizione</th></tr>
+    <tr><td><code>/health</code></td><td>GET</td><td>Health check del server</td></tr>
+    <tr><td><code>/mcp/info</code></td><td>GET</td><td>Metadati del server MCP</td></tr>
+    <tr><td><code>/auth/callback</code></td><td>GET</td><td>Callback OAuth — riceve il <code>code</code> da Google</td></tr>
+    <tr><td><code>/auth/direct</code></td><td>POST</td><td>Auth alternativa via cookie/credenziali</td></tr>
+    <tr><td><code>/mcp/calendars</code></td><td>GET</td><td>Lista calendari disponibili</td></tr>
+    <tr><td><code>/mcp/events/upcoming</code></td><td>GET</td><td>Prossimi eventi (tutti i calendari)</td></tr>
+    <tr><td><code>/mcp/events/create</code></td><td>POST</td><td>Crea un evento</td></tr>
+    <tr><td><code>/mcp/events/update</code></td><td>PUT</td><td>Modifica un evento</td></tr>
+    <tr><td><code>/mcp/events/delete</code></td><td>DELETE</td><td>Elimina un evento</td></tr>
+    <tr><td><code>/mcp/events/detail</code></td><td>GET</td><td>Dettaglio di un evento specifico</td></tr>
+  </table>
+
+  <div class="callout info">
+    ℹ️ Tutte le route operative sono sotto il prefisso <code>/mcp/</code>. Il nome del pacchetto "MCP" è fuorviante: <strong>non espone il protocollo MCP/SSE</strong> — è una pura REST API con autenticazione OAuth 2.0.
+  </div>
+
+  <!-- ===== PAYLOAD ===== -->
+  <h2>7. Formato payload per la creazione eventi</h2>
+  <p>Il body va inviato come <code>{ eventData: { ... } }</code> — il payload NON è flat:</p>
+  <pre>POST /mcp/events/create
+Content-Type: application/json
+
+{
+  <span class="key">"eventData"</span>: {
+    <span class="key">"calendarId"</span>:  <span class="val">"primary"</span>,
+    <span class="key">"summary"</span>:     <span class="val">"Verifica Tecnica — Domenico Zurlo"</span>,
+    <span class="key">"description"</span>: <span class="val">"Note opzionali"</span>,
+    <span class="key">"start"</span>:       { <span class="key">"dateTime"</span>: <span class="val">"2026-06-01T09:00:00+02:00"</span> },
+    <span class="key">"end"</span>:         { <span class="key">"dateTime"</span>: <span class="val">"2026-06-01T10:00:00+02:00"</span> }
+  }
+}</pre>
+
+  <!-- ===== RINNOVO ===== -->
+  <h2>8. Rinnovo delle credenziali</h2>
+  <p>Il <code>refresh_token</code> ha una durata di ~7 giorni in modalità Testing. Per rinnovarlo:</p>
+  <ol>
+    <li>Ripeti lo Step 7 con l'URL OAuth (il <code>prompt=consent</code> forza un nuovo consent)</li>
+    <li>Il file <code>google_token.json</code> viene sovrascritto con i nuovi token</li>
+    <li>Non è necessario riavviare i container</li>
+  </ol>
+
+  <div class="callout warn">
+    ⚠️ Per eliminare la scadenza del refresh_token è necessario pubblicare l'app OAuth (passare da <strong>Testing</strong> a <strong>In produzione</strong> nella schermata consenso). Per uso interno/demo non è necessario.
+  </div>
+
+  <hr/>
+  <p style="font-size:0.8rem; color:#9ca3af; text-align:center;">Documento generato il 31 maggio 2026 — LibreChat agents-gateway project</p>
+
+</div>
+
+<button class="btn-print" onclick="window.print()">🖨️ Stampa / Salva PDF</button>
+</body>
+</html>

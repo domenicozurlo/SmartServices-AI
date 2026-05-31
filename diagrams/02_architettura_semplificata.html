@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Architettura — Vista semplificata</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #f8f9fa; display: flex; flex-direction: column; align-items: center; padding: 32px; }
+    h1 { font-size: 1.3rem; color: #333; margin-bottom: 24px; }
+    #diagram { background: white; border-radius: 12px; padding: 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); max-width: 1100px; width: 100%; }
+    .btn-bar { margin-top: 20px; display: flex; gap: 12px; }
+    button { padding: 10px 22px; border: none; border-radius: 8px; cursor: pointer; font-size: 0.95rem; font-weight: 600; }
+    .btn-svg { background: #4f46e5; color: white; }
+    .btn-png { background: #0ea5e9; color: white; }
+    button:hover { opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <h1>Architettura — Vista semplificata</h1>
+  <div id="diagram">
+    <div class="mermaid">
+flowchart LR
+    USER(["👤 Utente"])
+
+    subgraph Chat["Interfaccia Chat"]
+        LC["LibreChat\n(finestra di chat)"]
+    end
+
+    subgraph Brain["Cervello del sistema"]
+        ROUTER["Smistatore\nCapisce di cosa\nha bisogno l'utente"]
+
+        DOC["📄 Esperto documenti\nCerca nelle FAQ\ne nei manuali caricati"]
+        BOOK["📅 Assistente prenotazioni\nCrea appuntamenti\nsul calendario"]
+        CONV["💬 Assistente generico\nRisponde a domande\ngenerali"]
+        STRUCT["📊 Analisi dati\nRisponde con dati\nstrutturati"]
+    end
+
+    subgraph External["Servizi esterni"]
+        GCAL["📆 Google Calendar"]
+        AI["🤖 Intelligenza Artificiale\nOpenAI"]
+    end
+
+    USER -->|"Scrive un messaggio"| LC
+    LC -->|"Invia la richiesta"| ROUTER
+
+    ROUTER -->|"domanda su documenti"| DOC
+    ROUTER -->|"vuole prenotare"| BOOK
+    ROUTER -->|"domanda generica"| CONV
+    ROUTER -->|"analisi dati"| STRUCT
+
+    BOOK -->|"crea evento"| GCAL
+    DOC & BOOK & CONV & STRUCT -->|"genera risposta"| AI
+
+    AI -->|"risposta"| LC
+    GCAL -->|"conferma"| LC
+    LC -->|"Mostra la risposta"| USER
+    </div>
+  </div>
+  <div class="btn-bar">
+    <button class="btn-svg" onclick="downloadSVG()">⬇ Scarica SVG</button>
+    <button class="btn-png" onclick="downloadPNG()">⬇ Scarica PNG</button>
+  </div>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'default', flowchart: { useMaxWidth: false } });
+
+    function getSVGEl() {
+      return document.querySelector('#diagram svg');
+    }
+
+    function downloadSVG() {
+      const svg = getSVGEl();
+      if (!svg) return alert('Diagramma non ancora renderizzato.');
+      const blob = new Blob([svg.outerHTML], { type: 'image/svg+xml' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = '02_architettura_semplificata.svg';
+      a.click();
+    }
+
+    function downloadPNG() {
+      const svg = getSVGEl();
+      if (!svg) return alert('Diagramma non ancora renderizzato.');
+      const svgData = new XMLSerializer().serializeToString(svg);
+      const canvas = document.createElement('canvas');
+      const rect = svg.getBoundingClientRect();
+      const scale = 2;
+      canvas.width = rect.width * scale;
+      canvas.height = rect.height * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/png');
+        a.download = '02_architettura_semplificata.png';
+        a.click();
+      };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgData);
+    }
+  </script>
+</body>
+</html>
