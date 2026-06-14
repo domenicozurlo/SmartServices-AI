@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import FormData from 'form-data';
 import { logger } from '@librechat/data-schemas';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -15,6 +16,9 @@ import type {
   MistralFileUploadResponse,
   MistralSignedUrlResponse,
   MistralOCRUploadResult,
+  StructuredOCRImageRecord,
+  StructuredOCRPage,
+  StructuredOCRResult,
   MistralOCRError,
   OCRResultPage,
   ServerRequest,
@@ -137,6 +141,7 @@ export async function getSignedUrl({
  * @param {string} [params.documentType='document_url'] - 'document_url' or 'image_url'
  * @param {string} [params.model]
  * @param {string} [params.baseURL]
+ * @param {boolean} [params.includeImageBase64=true] - Request base64 image data for multimodal processing
  * @returns {Promise<OCRResult>}
  */
 export async function performOCR({
@@ -145,12 +150,14 @@ export async function performOCR({
   model = DEFAULT_MISTRAL_MODEL,
   baseURL = DEFAULT_MISTRAL_BASE_URL,
   documentType = 'document_url',
+  includeImageBase64 = true,
 }: {
   url: string;
   apiKey: string;
   model?: string;
   baseURL?: string;
   documentType?: 'document_url' | 'image_url';
+  includeImageBase64?: boolean;
 }): Promise<OCRResult> {
   const documentKey = documentType === 'image_url' ? 'image_url' : 'document_url';
 
@@ -172,8 +179,7 @@ export async function performOCR({
       ocrURL,
       {
         model,
-        image_limit: 0,
-        include_image_base64: false,
+        include_image_base64: includeImageBase64,
         document: {
           type: documentType,
           [documentKey]: url,
@@ -332,7 +338,7 @@ function getDocumentType(file: Express.Multer.File): 'image_url' | 'document_url
 }
 
 /**
- * Processes OCR result pages into aggregated text and images
+ * Processes OCR result pages into aggregated text and images (legacy flat format).
  */
 function processOCRResult(ocrResult: OCRResult): { text: string; images: string[] } {
   let aggregatedText = '';
@@ -357,6 +363,182 @@ function processOCRResult(ocrResult: OCRResult): { text: string; images: string[
   });
 
   return { text: aggregatedText, images };
+}
+
+/**
+ * Returns the base URL used to construct public image URLs for OCR-extracted images.
+ * Priority: APP_URL env var → fallback to localhost.
+ */
+function getImageBaseURL(): string {
+  return (process.env.APP_URL || 'http://localhost:3080').replace(/\/$/, '');
+}
+
+/**
+ * Returns the filesystem directory where OCR images are saved.
+ * Images are stored under client/public/images so they are served via the /images/ static route.
+ */
+function getOCRImageDir(fileId: string): string {
+  // process.cwd() is the project root when the backend starts from there.
+  // Fallback: walk up 5 levels from compiled __dirname (packages/api/dist/files/mistral/).
+  const projectRoot = process.cwd().endsWith('packages/api')
+    ? path.resolve(process.cwd(), '..', '..')
+    : process.cwd();
+  return path.join(projectRoot, 'client', 'public', 'images', 'rag-images', fileId);
+}
+
+/**
+ * Saves a single base64-encoded OCR image to disk.
+ * Returns the saved file path and its public URL, or null if saving fails.
+ */
+async function saveOCRImage(
+  base64Data: string,
+  imageId: string,
+  fileId: string,
+): Promise<{ filePath: string; url: string; size: number; hash: string } | null> {
+  try {
+    // Strip data URI prefix if present (e.g. "data:image/png;base64,...")
+    const commaIdx = base64Data.indexOf(',');
+    const raw = commaIdx >= 0 ? base64Data.slice(commaIdx + 1) : base64Data;
+
+    const buffer = Buffer.from(raw, 'base64');
+    const hash = crypto.createHash('md5').update(buffer).digest('hex');
+
+    const imageDir = getOCRImageDir(fileId);
+    await fs.promises.mkdir(imageDir, { recursive: true });
+
+    const fileName = `${imageId}.png`;
+    const filePath = path.join(imageDir, fileName);
+    await fs.promises.writeFile(filePath, buffer);
+
+    const url = `${getImageBaseURL()}/images/rag-images/${fileId}/${fileName}`;
+    logger.debug(`[OCR] Saved image ${imageId} → ${filePath} (${buffer.length} bytes)`);
+    return { filePath, url, size: buffer.length, hash };
+  } catch (err) {
+    logger.warn(`[OCR] Failed to save image ${imageId}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Builds structured per-page OCR output and saves extracted images to storage.
+ * Returns both the legacy flat text and the new structured result.
+ */
+async function processOCRResultStructured(
+  ocrResult: OCRResult,
+  fileId: string,
+  sourceFile: string,
+): Promise<{ text: string; structured_ocr: StructuredOCRResult }> {
+  logger.debug(`[OCR] processOCRResultStructured: ${ocrResult.pages.length} pages, file_id=${fileId}`);
+
+  let aggregatedText = '';
+  const structuredPages: StructuredOCRPage[] = [];
+
+  for (let i = 0; i < ocrResult.pages.length; i++) {
+    const page = ocrResult.pages[i];
+    const pageNum = page.index + 1;
+
+    logger.info(
+      `[OCR] page ${pageNum}: images_in_api=${page.images?.length ?? 0}, markdown_len=${page.markdown?.length ?? 0}`,
+    );
+
+    if (ocrResult.pages.length > 1) {
+      aggregatedText += `# PAGE ${pageNum}\n`;
+    }
+    aggregatedText += page.markdown + '\n\n';
+
+    const structuredImages: StructuredOCRImageRecord[] = [];
+    // We'll build a modified markdown that replaces Mistral's image refs with <image_id> tags
+    let modifiedMarkdown = page.markdown;
+
+    if (page.images && page.images.length > 0) {
+      for (const img of page.images) {
+        const imageId = `${fileId}_p${pageNum}_img${img.id || String(structuredImages.length + 1).padStart(2, '0')}`;
+
+        logger.info(
+          `[OCR] page ${pageNum} img "${img.id}": has_base64=${!!img.image_base64}, base64_len=${img.image_base64?.length ?? 0}`,
+        );
+
+        let url = '';
+        let sizeBytes = 0;
+        let imageHash: string | undefined;
+
+        if (img.image_base64) {
+          const saved = await saveOCRImage(img.image_base64, imageId, fileId);
+          if (saved) {
+            url = saved.url;
+            sizeBytes = saved.size;
+            imageHash = saved.hash;
+            logger.info(`[OCR] page ${pageNum} img "${imageId}" saved → url=${url}`);
+          } else {
+            logger.warn(`[OCR] page ${pageNum} img "${imageId}": saveOCRImage returned null`);
+          }
+        } else {
+          logger.warn(`[OCR] page ${pageNum} img "${img.id}": image_base64 is empty/missing — url will be blank`);
+        }
+
+        // Replace Mistral's image markdown reference (![id](id)) with our <image_id> placeholder
+        // so chunk text carries the placeholder the doc_kb agent can emit.
+        const mistralRef = `![${img.id}](${img.id})`;
+        if (modifiedMarkdown.includes(mistralRef)) {
+          modifiedMarkdown = modifiedMarkdown.split(mistralRef).join(`<image_id>${imageId}</image_id>`);
+          logger.debug(`[OCR] page ${pageNum}: replaced "${mistralRef}" → <image_id>${imageId}</image_id>`);
+        } else {
+          logger.warn(`[OCR] page ${pageNum}: could not find ref "${mistralRef}" in markdown — placeholder not injected. Markdown snippet: ${modifiedMarkdown.slice(0, 200)}`);
+        }
+
+        const caption = img.image_annotation || '';
+
+        structuredImages.push({
+          image_id: imageId,
+          url,
+          caption,
+          image_summary: caption,
+          width: img.bottom_right_x != null && img.top_left_x != null
+            ? img.bottom_right_x - img.top_left_x
+            : null,
+          height: img.bottom_right_y != null && img.top_left_y != null
+            ? img.bottom_right_y - img.top_left_y
+            : null,
+          mime_type: 'image/png',
+          size_bytes: sizeBytes,
+          bbox:
+            img.top_left_x != null
+              ? {
+                  x: img.top_left_x,
+                  y: img.top_left_y,
+                  w: img.bottom_right_x - img.top_left_x,
+                  h: img.bottom_right_y - img.top_left_y,
+                }
+              : null,
+          ...(imageHash ? { image_hash: imageHash } : {}),
+        });
+      }
+    }
+
+    structuredPages.push({
+      page: pageNum,
+      markdown: modifiedMarkdown,
+      images: structuredImages,
+      dimensions: page.dimensions ? { ...page.dimensions } : {},
+    });
+  }
+
+  const totalImages = structuredPages.reduce((s, p) => s + p.images.length, 0);
+  const totalWithUrl = structuredPages.reduce(
+    (s, p) => s + p.images.filter((img) => img.url).length,
+    0,
+  );
+  const structured_ocr: StructuredOCRResult = {
+    file_id: fileId,
+    source_file: sourceFile,
+    pages: structuredPages,
+  };
+
+  logger.info(
+    `[OCR] Structured result: ${structuredPages.length} pages, total images: ${totalImages}, images with url: ${totalWithUrl}`,
+  );
+
+  return { text: aggregatedText, structured_ocr };
 }
 
 /**
@@ -419,14 +601,25 @@ export const uploadMistralOCR = async (context: OCRContext): Promise<MistralOCRU
       baseURL,
       apiKey,
       model,
+      includeImageBase64: true,
     });
+
+    logger.debug('[OCR] uploadMistralOCR raw result pages:', ocrResult?.pages?.length ?? 0);
 
     if (!ocrResult || !ocrResult.pages || ocrResult.pages.length === 0) {
       throw new Error(
         'No OCR result returned from service, may be down or the file is not supported.',
       );
     }
-    const { text, images } = processOCRResult(ocrResult);
+
+    // Generate a stable file_id for image naming (use mistral file id prefix + original name hash)
+    const fileId = context.req.body?.file_id || mistralFile.id;
+    const { text, structured_ocr } = await processOCRResultStructured(
+      ocrResult,
+      fileId,
+      context.file.originalname,
+    );
+    const { images } = processOCRResult(ocrResult);
 
     if (mistralFileId && apiKey && baseURL) {
       await deleteMistralFile({ fileId: mistralFileId, apiKey, baseURL });
@@ -438,6 +631,7 @@ export const uploadMistralOCR = async (context: OCRContext): Promise<MistralOCRU
       filepath: FileSources.mistral_ocr,
       text,
       images,
+      structured_ocr,
     };
   } catch (error) {
     if (mistralFileId && apiKey && baseURL) {
@@ -481,7 +675,10 @@ export const uploadAzureMistralOCR = async (
       model,
       url: `${base64Prefix}${base64}`,
       documentType,
+      includeImageBase64: true,
     });
+
+    logger.debug('[OCR] uploadAzureMistralOCR raw result pages:', ocrResult?.pages?.length ?? 0);
 
     if (!ocrResult || !ocrResult.pages || ocrResult.pages.length === 0) {
       throw new Error(
@@ -489,7 +686,13 @@ export const uploadAzureMistralOCR = async (
       );
     }
 
-    const { text, images } = processOCRResult(ocrResult);
+    const fileId = context.req.body?.file_id || context.file.originalname;
+    const { text, structured_ocr } = await processOCRResultStructured(
+      ocrResult,
+      fileId,
+      context.file.originalname,
+    );
+    const { images } = processOCRResult(ocrResult);
 
     return {
       filename: context.file.originalname,
@@ -497,6 +700,7 @@ export const uploadAzureMistralOCR = async (
       filepath: FileSources.azure_mistral_ocr,
       text,
       images,
+      structured_ocr,
     };
   } catch (error) {
     throw createOCRError(error, 'Error uploading document to Azure Mistral OCR API:');
@@ -717,7 +921,18 @@ export const uploadGoogleVertexMistralOCR = async (
       );
     }
 
-    const { text, images } = processOCRResult(ocrResult);
+    logger.debug(
+      '[OCR] uploadGoogleVertexMistralOCR raw result pages:',
+      ocrResult?.pages?.length ?? 0,
+    );
+
+    const fileId = context.req.body?.file_id || context.file.originalname;
+    const { text, structured_ocr } = await processOCRResultStructured(
+      ocrResult,
+      fileId,
+      context.file.originalname,
+    );
+    const { images } = processOCRResult(ocrResult);
 
     return {
       filename: context.file.originalname,
@@ -725,6 +940,7 @@ export const uploadGoogleVertexMistralOCR = async (
       filepath: FileSources.vertexai_mistral_ocr as string,
       text,
       images,
+      structured_ocr,
     };
   } catch (error) {
     throw createOCRError(error, 'Error uploading document to Google Vertex AI Mistral OCR:');

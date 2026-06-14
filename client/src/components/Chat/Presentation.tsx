@@ -8,6 +8,7 @@ import { EditorProvider, ArtifactsProvider } from '~/Providers';
 import { useDeleteFilesMutation } from '~/data-provider';
 import Artifacts from '~/components/Artifacts/Artifacts';
 import { SidePanelGroup } from '~/components/SidePanel';
+import CitationDrawer from '~/components/Chat/Messages/Content/CitationDrawer';
 import { useSetFilesToDelete } from '~/hooks';
 import store from '~/store';
 
@@ -82,6 +83,7 @@ export default function Presentation({ children }: { children: React.ReactNode }
           {children}
         </main>
       </SidePanelGroup>
+      <CitationDrawer />
     </DragDropWrapper>
   );
 }

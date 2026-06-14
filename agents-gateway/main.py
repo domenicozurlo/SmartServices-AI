@@ -25,6 +25,12 @@ from handlers.agents.conversational import run_conversational
 from handlers.agents.structured_qa import run_structured_qa
 from handlers.agents.booking import run_booking
 from handlers.smart_service_flow import RouteResult, get_route_and_query
+from handlers.multimodal import (
+    parse_tool_results,
+    build_images_by_id,
+    select_contextual_images,
+    build_sources,
+)
 from logger import get_logger
 from registry import get, list_models
 
@@ -154,16 +160,46 @@ def _make_tool_call_response(model: str, query: str) -> dict:
     }
 
 
-def _build_round2_input(raw_messages: List[Message]) -> tuple[list, str]:
+def _build_round2_input(raw_messages: List[Message]) -> tuple[list, str, dict]:
     """Extract the last user query and tool content from Round 2 messages.
-    Returns (agent_messages, user_query) ready for run_doc_kb.
+
+    Returns (agent_messages, user_query, multimodal_ctx) where:
+    - agent_messages: ready for legacy run_doc_kb call (no context_groups)
+    - user_query: the rewritten query from the last tool_calls assistant message
+      (falls back to the last user message if not found)
+    - multimodal_ctx: dict with keys context_groups, images_by_id, sources — or empty dict
+      when the tool message is plain text (legacy format).
     """
     user_query = ""
     tool_content = ""
 
-    # Last user message (the actual question, not an earlier greeting)
+    # Prefer the rewritten query stored in the last assistant tool_call arguments.
+    # This is the enriched query the classifier produced in Round 1, which is
+    # much more specific than the raw user message and yields better answers.
     for m in reversed(raw_messages):
-        if m.role == "user":
+        if m.role != "assistant" or not m.tool_calls:
+            continue
+        for tc in m.tool_calls:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
+            if fn is None:
+                continue
+            args_raw = fn.get("arguments", "") if isinstance(fn, dict) else getattr(fn, "arguments", "")
+            try:
+                args = json.loads(args_raw)
+                q = args.get("query", "")
+                if q:
+                    user_query = q
+                    break
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if user_query:
+            break
+
+    # Fall back to the last raw user message if no tool_call query was found.
+    if not user_query:
+        for m in reversed(raw_messages):
+            if m.role != "user":
+                continue
             if isinstance(m.content, str):
                 user_query = m.content
             elif isinstance(m.content, list):
@@ -174,16 +210,49 @@ def _build_round2_input(raw_messages: List[Message]) -> tuple[list, str]:
             if user_query:
                 break
 
-    # First tool result (file_search output)
-    for m in raw_messages:
-        if m.role == "tool":
-            if isinstance(m.content, str):
-                tool_content = m.content
-            elif isinstance(m.content, list):
-                parts = [b.get("text", b.get("content", "")) for b in m.content if isinstance(b, dict)]
-                tool_content = "\n".join(parts)
-            break
+    # Last tool result (file_search output for the current turn, not a previous one)
+    for m in reversed(raw_messages):
+        if m.role != "tool":
+            continue
+        if isinstance(m.content, str):
+            tool_content = m.content
+        elif isinstance(m.content, list):
+            parts = [b.get("text", b.get("content", "")) for b in m.content if isinstance(b, dict)]
+            tool_content = "\n".join(parts)
+        break
 
+    log.debug(
+        "round2._build_round2_input",
+        user_query_preview=user_query[:80],
+        tool_content_len=len(tool_content),
+    )
+    log.info(
+        "round2.tool_content_preview",
+        preview=tool_content[:300],
+    )
+
+    # Try multimodal format first
+    multimodal_data = parse_tool_results(tool_content)
+    log.info("round2.parse_tool_results", is_multimodal=multimodal_data is not None)
+    if multimodal_data:
+        context_groups = multimodal_data.get("context_groups", [])
+        images_by_id = build_images_by_id(context_groups)
+        sources = build_sources(context_groups)
+        log.info(
+            "round2.multimodal_tool_message",
+            groups=len(context_groups),
+            images=len(images_by_id),
+            sources=len(sources),
+        )
+        # Return empty agent_messages for multimodal path (context is passed separately)
+        return [], user_query, {
+            "context_groups": context_groups,
+            "images_by_id": images_by_id,
+            "sources": sources,
+        }
+
+    # Legacy plain-text tool message
+    log.info("round2.legacy_tool_message", tool_content_len=len(tool_content))
     agent_messages = [
         {"role": "user", "content": [{"type": "input_text", "text": user_query}]},
     ]
@@ -192,16 +261,93 @@ def _build_round2_input(raw_messages: List[Message]) -> tuple[list, str]:
             "role": "user",
             "content": [{"type": "input_text", "text": f"[Retrieved document context]\n{tool_content}"}],
         })
-    return agent_messages, user_query
+    return agent_messages, user_query, {}
 
 
-async def _stream_doc_kb_synthesis(messages: list, query: str, model: str) -> AsyncGenerator[str, None]:
+async def _stream_doc_kb_synthesis(
+    messages: list,
+    query: str,
+    model: str,
+    multimodal_ctx: dict = None,
+) -> AsyncGenerator[str, None]:
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     yield _sse_chunk({"role": "assistant", "content": ""}, model, chunk_id)
-    async for text in run_doc_kb(messages, query):
+
+    ctx = multimodal_ctx or {}
+    context_groups = ctx.get("context_groups") or []
+    images_by_id = ctx.get("images_by_id") or {}
+    sources = ctx.get("sources") or []
+
+    # Accumulate the full answer so we can build rag_context after streaming ends.
+    full_answer_parts: list = []
+    async for text in run_doc_kb(
+        messages,
+        query,
+        context_groups=context_groups,
+        images_by_id=images_by_id,
+        sources=sources,
+    ):
         if text:
+            full_answer_parts.append(text)
             yield _sse_chunk({"content": text}, model, chunk_id)
-    yield _sse_chunk({}, model, chunk_id, finish_reason="stop")
+
+    # Build rag_context from the multimodal context available in this turn.
+    # This follows the shape expected by the LibreChat RAG panel components:
+    #   data_points.text      — raw chunk texts for SupportingContent
+    #   data_points.images    — image URLs for inline/panel display
+    #   data_points.citations — source file + page references
+    #   thoughts              — query step shown in ThoughtProcess panel
+    rag_context: Optional[dict] = None
+    if context_groups:
+        text_snippets: list = []
+        citation_strs: list = []
+        seen_citations: set = set()
+
+        for group in context_groups:
+            for chunk in group.get("chunks", []):
+                if chunk.get("score", 0) > 0:
+                    text_snippets.append(chunk.get("text", "").strip())
+                m = chunk.get("metadata", {})
+                sf = m.get("source_file", "")
+                pg = m.get("page")
+                key = f"{sf}:{pg}"
+                if sf and key not in seen_citations:
+                    seen_citations.add(key)
+                    label = f"{sf}#page={pg}" if pg is not None else sf
+                    citation_strs.append(label)
+
+        image_urls = [
+            img["url"]
+            for img in images_by_id.values()
+            if img.get("url")
+        ]
+
+        rag_context = {
+            "data_points": {
+                "text": text_snippets[:10],
+                "images": image_urls[:8],
+                "citations": citation_strs,
+            },
+            "thoughts": [
+                {"title": "Query documento", "description": query}
+            ],
+            "followup_questions": None,
+        }
+
+    # Emit the stop chunk; if rag_context is available, include it as a
+    # top-level field so the frontend can extract it without breaking
+    # standard OpenAI SSE consumers (unknown fields are ignored).
+    stop_payload = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    if rag_context is not None:
+        stop_payload["rag_context"] = rag_context
+
+    yield f"data: {json.dumps(stop_payload)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -330,7 +476,7 @@ async def chat_completions(request: Request, body: ChatRequest):
 
         # Round 2: LibreChat executed file_search and sent back results.
         if has_tool_result:
-            agent_msgs, user_query = _build_round2_input(body.messages)
+            agent_msgs, user_query, multimodal_ctx = _build_round2_input(body.messages)
             tool_chars = sum(
                 len(m.content) if isinstance(m.content, str) else 0
                 for m in body.messages if m.role == "tool"
@@ -339,15 +485,27 @@ async def chat_completions(request: Request, body: ChatRequest):
                 "round2.synthesis",
                 user_query_preview=user_query[:120],
                 tool_content_chars=tool_chars,
+                multimodal=bool(multimodal_ctx),
                 stream=body.stream,
             )
             if body.stream:
                 return StreamingResponse(
-                    _stream_doc_kb_synthesis(agent_msgs, user_query, body.model),
+                    _stream_doc_kb_synthesis(
+                        agent_msgs, user_query, body.model, multimodal_ctx=multimodal_ctx
+                    ),
                     media_type="text/event-stream",
                     headers=_SSE_HEADERS,
                 )
-            chunks = [c async for c in run_doc_kb(agent_msgs, user_query)]
+            chunks = [
+                c
+                async for c in run_doc_kb(
+                    agent_msgs,
+                    user_query,
+                    context_groups=multimodal_ctx.get("context_groups"),
+                    images_by_id=multimodal_ctx.get("images_by_id"),
+                    sources=multimodal_ctx.get("sources"),
+                )
+            ]
             final = "".join(chunks)
             return {
                 "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -398,14 +556,22 @@ async def chat_completions(request: Request, body: ChatRequest):
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                 }
             elif route_result.route == "doc_kb":
-                log.info("round1.emitting_tool_call", query_preview=route_result.rewritten_query[:120], stream=body.stream)
+                # Use the short search_query for RAG retrieval (better vector search),
+                # fall back to rewritten_query when search_query is not set.
+                rag_query = route_result.search_query or route_result.rewritten_query
+                log.info(
+                    "round1.emitting_tool_call",
+                    rag_query_preview=rag_query[:120],
+                    rewritten_preview=route_result.rewritten_query[:80],
+                    stream=body.stream,
+                )
                 if body.stream:
                     return StreamingResponse(
-                        _stream_tool_call_response(body.model, route_result.rewritten_query),
+                        _stream_tool_call_response(body.model, rag_query),
                         media_type="text/event-stream",
                         headers=_SSE_HEADERS,
                     )
-                return JSONResponse(_make_tool_call_response(body.model, route_result.rewritten_query))
+                return JSONResponse(_make_tool_call_response(body.model, rag_query))
             else:
                 # conversational / booking / structured_qa: route already known, dispatch directly
                 log.info("round1.direct_dispatch", route=route_result.route)

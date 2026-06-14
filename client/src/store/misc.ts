@@ -64,6 +64,17 @@ const chatBadges = atomWithLocalStorage<Pick<BadgeItem, 'id'>[]>('chatBadges', [
   // { id: '2' },
 ]);
 
+export type CitationPanelState = {
+  fileId: string;
+  fileName: string;
+  page?: number;
+} | null;
+
+const citationPanel = atom<CitationPanelState>({
+  key: 'citationPanel',
+  default: null,
+});
+
 export default {
   hideBannerHint,
   messageAttachmentsMap,
@@ -71,4 +82,5 @@ export default {
   queriesEnabled,
   isEditingBadges,
   chatBadges,
+  citationPanel,
 };

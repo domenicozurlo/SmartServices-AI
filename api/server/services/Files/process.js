@@ -848,7 +848,22 @@ const processAgentFileUpload = async ({ req, res, metadata }) => {
     if (shouldUseOCR) {
       const ocrResult = await resolveDocumentText();
       if (ocrResult) {
-        const { text, bytes, filepath: ocrFileURL } = ocrResult;
+        const { text, bytes, filepath: ocrFileURL, structured_ocr } = ocrResult;
+        logger.debug(
+          `[multimodal] OCR result for "${file.originalname}": structured_ocr pages=${structured_ocr?.pages?.length ?? 'none'}`,
+        );
+        // Fire-and-forget structured multimodal embed — must not block text file creation
+        if (structured_ocr) {
+          const { uploadStructuredVectors } = require('./VectorDB/crud');
+          uploadStructuredVectors({
+            req,
+            file_id,
+            structured_ocr,
+            entity_id,
+          }).catch((err) =>
+            logger.warn('[multimodal] Async structured embed error:', err?.message),
+          );
+        }
         return await createTextFile({ text, bytes, filepath: ocrFileURL });
       }
       throw new Error(
@@ -885,6 +900,32 @@ const processAgentFileUpload = async ({ req, res, metadata }) => {
   const isImageFile = file.mimetype.startsWith('image');
   const source = getFileStrategy(appConfig, { isImage: isImageFile });
 
+  // OCR eligibility check for file_search path (mirrors agent upload path logic)
+  const _fileConfig = mergeFileConfig(appConfig.fileConfig);
+  const shouldUseConfiguredOCR =
+    appConfig?.ocr != null &&
+    _fileConfig.checkType(file.mimetype, _fileConfig.ocr?.supportedMimeTypes || []);
+  const shouldUseOCR = shouldUseConfiguredOCR;
+  logger.info(
+    `[multimodal][file_search] OCR eligibility check: shouldUseConfiguredOCR=${shouldUseConfiguredOCR}, mimetype=${file.mimetype}, ocrConfigured=${appConfig?.ocr != null}`,
+  );
+  const resolveDocumentText = async () => {
+    if (!shouldUseConfiguredOCR) {
+      return null;
+    }
+    try {
+      const ocrStrategy = appConfig?.ocr?.strategy ?? FileSources.document_parser;
+      const { handleFileUpload: ocrUpload } = getStrategyFunctions(ocrStrategy);
+      return await ocrUpload({ req, file, loadAuthValues });
+    } catch (err) {
+      logger.warn(
+        `[multimodal][file_search] OCR failed for "${file.originalname}":`,
+        err?.message,
+      );
+      return null;
+    }
+  };
+
   if (tool_resource === EToolResources.file_search) {
     // FIRST: Upload to Storage for permanent backup (S3/local/etc.)
     const { handleFileUpload } = getStrategyFunctions(source);
@@ -897,8 +938,8 @@ const processAgentFileUpload = async ({ req, res, metadata }) => {
       entity_id,
     });
 
-    // SECOND: Upload to Vector DB
-    const { uploadVectors } = require('./VectorDB/crud');
+    // SECOND: Upload to Vector DB (plain text, always runs for backward compat)
+    const { uploadVectors, uploadStructuredVectors } = require('./VectorDB/crud');
 
     embeddingResult = await uploadVectors({
       req,
@@ -906,6 +947,39 @@ const processAgentFileUpload = async ({ req, res, metadata }) => {
       file_id,
       entity_id,
     });
+
+    // THIRD (optional): If OCR is configured and the file is eligible, also run
+    // structured multimodal embed so the vector store gets rich chunk metadata.
+    if (shouldUseOCR && shouldUseConfiguredOCR) {
+      logger.info(`[multimodal][file_search] Running OCR for structured embed: "${file.originalname}"`);
+      const ocrResult = await resolveDocumentText().catch((err) => {
+        logger.warn(
+          `[multimodal] OCR for file_search failed for "${file.originalname}", skipping structured embed:`,
+          err?.message,
+        );
+        return null;
+      });
+      if (ocrResult?.structured_ocr) {
+        logger.info(
+          `[multimodal] file_search: OCR OK for "${file.originalname}", pages=${ocrResult.structured_ocr.pages?.length} — calling uploadStructuredVectors`,
+        );
+        uploadStructuredVectors({
+          req,
+          file_id,
+          structured_ocr: ocrResult.structured_ocr,
+          entity_id,
+          source_url_base: `/api/files/serve/${file_id}`,
+        }).catch((err) =>
+          logger.warn('[multimodal] Async structured embed (file_search) error:', err?.message),
+        );
+      } else {
+        logger.warn(
+          `[multimodal][file_search] OCR result had no structured_ocr field for "${file.originalname}": keys=${Object.keys(ocrResult || {}).join(',')}`,
+        );
+      }
+    } else {
+      logger.debug(`[multimodal][file_search] OCR skipped (shouldUseOCR=${shouldUseOCR})`);
+    }
 
     // Vector status will be stored at root level, no need for metadata
     fileInfoMetadata = {};

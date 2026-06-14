@@ -23,15 +23,24 @@
 
 services:
 
-# USE LIBRECHAT CONFIG FILE
+# USE LIBRECHAT CONFIG FILE + LOCAL BUILD
   api:
+    image: librechat
+    build:
+      context: .
+      target: node
     depends_on:
       agents-gateway:
         condition: service_healthy
+    environment:
+      - AGENTS_GATEWAY_URL=http://agents-gateway:8001
     volumes:
     - type: bind
       source: ./librechat.yaml
       target: /app/librechat.yaml
+    - type: bind
+      source: ./client/dist
+      target: /app/client/dist
 
 # AGENTS GATEWAY - FastAPI wrapper using OpenAI Agents SDK
   agents-gateway:
@@ -42,6 +51,8 @@ services:
       - "8001:8001"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DOC_KB_MODEL=${DOC_KB_MODEL:-gpt-5-mini}
+      - DOC_KB_INCLUDE_REASONING=${DOC_KB_INCLUDE_REASONING:-false}
       - GOOGLE_CALENDAR_MCP_URL=http://google-calendar-mcp:3000
     restart: always
     healthcheck:
@@ -49,7 +60,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+
+# EXPOSE pgvector port so pgvector-explorer can connect from the host
+  vectordb:
+    ports:
+      - "5432:5432"
 
 # Google Calendar MCP server (HTTP/SSE transport, OAuth 2.0)
 # First run: exec into the container and authorize via browser:
@@ -144,11 +159,26 @@ services:
 #     profiles:
 #       - donotstart
 
-# # EXPOSE MEILISEARCH PORTS - DO NOT USE THE DEFAULT VALUE FOR THE MASTER KEY IF YOU DO THIS
-#   meilisearch:
-#     ports:
-#       - 7700:7700
+# EXPOSE MEILISEARCH PORTS - DO NOT USE THE DEFAULT VALUE FOR THE MASTER KEY IF YOU DO THIS
+  meilisearch:
+    ports:
+      - 7700:7700
 
+  rag_api:
+    image: smartservices-ai-rag_api:local
+    build:
+      context: ./rag_api-main
+      dockerfile: Dockerfile.lite
+      target: lite
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - RAG_OPENAI_API_KEY=${RAG_OPENAI_API_KEY}
+      - DOMAIN_HINTS_ENABLED=${DOMAIN_HINTS_ENABLED:-true}
+      - RAG_RERANK_MARGIN=${RAG_RERANK_MARGIN:-0.04}
+    volumes:
+      - ./rag_api-main/uploads:/app/uploads
 # # USE RAG API IMAGE WITH LOCAL EMBEDDINGS SUPPORT
 #  rag_api:
 #    image: registry.librechat.ai/danny-avila/librechat-rag-api-dev:latest

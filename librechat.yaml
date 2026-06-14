@@ -369,7 +369,7 @@ endpoints:
   custom:
     - name: "SmartServiceFlow"
       apiKey: "123"
-      baseURL: "http://agents-gateway:8001/v1/chat/completions"
+      baseURL: "${AGENTS_GATEWAY_URL}/v1/chat/completions"
       directEndpoint: true
       titleConvo: true
       titleModel: "smart_service_flow"

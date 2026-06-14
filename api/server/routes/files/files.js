@@ -609,6 +609,42 @@ router.get('/download/:userId/:file_id', fileAccess, async (req, res) => {
   }
 });
 
+/**
+ * Serve a file inline in the browser (e.g. PDF viewer with #page=N fragment).
+ * Only local-storage files are supported; cloud files redirect to their download URL.
+ * @route GET /files/serve/:file_id
+ */
+router.get('/serve/:file_id', fileAccess, async (req, res) => {
+  try {
+    const file = req.fileAccess.file;
+    const { getDownloadStream, getDownloadURL } = getStrategyFunctions(file.source);
+
+    if (getDownloadURL) {
+      const url = await getDirectDownloadURL({ req, file });
+      if (url) {
+        return res.redirect(302, url);
+      }
+    }
+
+    if (!getDownloadStream) {
+      return res.status(501).send('Not Implemented');
+    }
+
+    const fileStream = await getDownloadStream(req, file.storageKey || file.filepath);
+    const mimeType = file.type || 'application/octet-stream';
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.filename)}"`);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fileStream.on('error', (streamError) => {
+      logger.error('[SERVE ROUTE] Stream error:', streamError);
+    });
+    fileStream.pipe(res);
+  } catch (error) {
+    logger.error('[SERVE ROUTE] Error serving file:', error);
+    res.status(500).send('Error serving file');
+  }
+});
+
 router.post('/', async (req, res) => {
   const metadata = req.body;
   let cleanup = true;

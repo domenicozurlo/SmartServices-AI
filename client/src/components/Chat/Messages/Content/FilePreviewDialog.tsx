@@ -19,6 +19,8 @@ interface FilePreviewDialogProps {
   pageRelevance?: Record<number, number>;
   fileType?: string;
   fileSize?: number;
+  /** When provided the iframe will jump to this page via blob URL fragment #page=N */
+  page?: number;
 }
 
 function getFileExtension(filename: string): string {
@@ -133,6 +135,7 @@ export default function FilePreviewDialog({
   pageRelevance,
   fileType,
   fileSize,
+  page,
 }: FilePreviewDialogProps) {
   const localize = useLocalize();
   const user = useRecoilValue(store.user);
@@ -301,7 +304,7 @@ export default function FilePreviewDialog({
           )}
           {fileBlobUrl && (
             <iframe
-              src={fileBlobUrl}
+              src={page ? `${fileBlobUrl}#page=${page}` : fileBlobUrl}
               title={`${localize('com_ui_preview')}: ${fileName}`}
               className="h-[70vh] w-full rounded-lg border border-border-light"
             />

@@ -16,6 +16,8 @@ export type RequestBody = {
   model?: string;
   key?: string;
   endpointOption?: Partial<TEndpointOption>;
+  /** File ID passed during file upload operations */
+  file_id?: string;
 };
 
 export type ServerRequest = Request<unknown, unknown, RequestBody> & {

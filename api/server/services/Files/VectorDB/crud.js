@@ -119,7 +119,54 @@ async function uploadVectors({ req, file, file_id, entity_id, storageMetadata })
   }
 }
 
+/**
+ * Uploads structured multimodal OCR data to the RAG API for multimodal chunking and embedding.
+ * Falls back silently if RAG_API_URL is not configured or the endpoint is unavailable.
+ *
+ * @param {Object} params
+ * @param {Object} params.req - Express request object with user info
+ * @param {string} params.file_id - The file ID
+ * @param {Object} params.structured_ocr - Structured OCR result from processOCRResultStructured
+ * @param {string} [params.entity_id] - Optional entity ID for shared resources
+ * @returns {Promise<void>}
+ */
+async function uploadStructuredVectors({ req, file_id, structured_ocr, entity_id, source_url_base }) {
+  if (!process.env.RAG_API_URL) {
+    logger.warn('[multimodal] RAG_API_URL not set, skipping structured embed');
+    return;
+  }
+  if (!structured_ocr) {
+    return;
+  }
+  try {
+    const jwtToken = generateShortLivedToken(req.user.id);
+    const payload = {
+      file_id,
+      structured_ocr,
+      ...(entity_id ? { entity_id } : {}),
+      ...(source_url_base ? { source_url_base } : {}),
+    };
+    logger.debug(
+      `[multimodal] Posting structured OCR to /embed-structured: file_id=${file_id}, pages=${structured_ocr.pages?.length ?? 0}`,
+    );
+    const response = await axios.post(`${process.env.RAG_API_URL}/embed-structured`, payload, {
+      headers: {
+        Authorization: `Bearer ${jwtToken}`,
+        'Content-Type': 'application/json',
+        accept: 'application/json',
+      },
+    });
+    logger.debug('[multimodal] /embed-structured response:', response.data);
+  } catch (error) {
+    // Log but do not throw — multimodal indexing is best-effort and must not
+    // break the primary OCR upload flow.
+    logAxiosError({ error, message: '[multimodal] Error posting to /embed-structured' });
+    logger.warn('[multimodal] Structured embed failed, RAG will fall back to plain text search');
+  }
+}
+
 module.exports = {
   deleteVectors,
   uploadVectors,
+  uploadStructuredVectors,
 };

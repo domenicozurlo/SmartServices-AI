@@ -1,5 +1,5 @@
 import React, { memo, useMemo, useRef, useEffect } from 'react';
-import { useRecoilValue } from 'recoil';
+import { useRecoilValue, useSetRecoilState } from 'recoil';
 import { useToastContext } from '@librechat/client';
 import { PermissionTypes, Permissions, apiBaseUrl } from 'librechat-data-provider';
 import Mermaid, { MermaidErrorBoundary } from '~/components/Messages/Content/Mermaid';
@@ -100,6 +100,38 @@ export const codeNoExecution: React.ElementType = memo(function MarkdownCodeNoEx
 });
 codeNoExecution.displayName = 'MarkdownCodeNoExecution';
 
+const CITATION_FILE_PATTERN = /\/api\/files\/serve\/([0-9a-f-]{36})/;
+
+type TCitationAnchorProps = {
+  href: string;
+  fileId: string;
+  page?: number;
+  children: React.ReactNode;
+};
+
+const CitationAnchor = memo(function CitationAnchor({
+  href,
+  fileId,
+  page,
+  children,
+}: TCitationAnchorProps) {
+  const setCitation = useSetRecoilState(store.citationPanel);
+  const label = typeof children === 'string' ? children : String(children);
+  return (
+    <a
+      href={href}
+      onClick={(e) => {
+        e.preventDefault();
+        setCitation({ fileId, fileName: label, page });
+      }}
+      className="cursor-pointer text-blue-500 underline hover:text-blue-600"
+    >
+      {children}
+    </a>
+  );
+});
+CitationAnchor.displayName = 'CitationAnchor';
+
 type TAnchorProps = {
   href: string;
   children: React.ReactNode;
@@ -129,6 +161,21 @@ export const a: React.ElementType = memo(function MarkdownAnchor({ href, childre
 
   const { refetch: downloadFile } = useFileDownload(user?.id ?? '', file_id, { direct: false });
   const props: { target?: string; onClick?: React.MouseEventHandler } = { target: '_blank' };
+
+  const citationMatch = useMemo(() => CITATION_FILE_PATTERN.exec(href), [href]);
+  const citationFileId = citationMatch?.[1];
+  const citationPage = useMemo(() => {
+    const m = /#page=(\d+)/.exec(href);
+    return m ? parseInt(m[1], 10) : undefined;
+  }, [href]);
+
+  if (citationFileId) {
+    return (
+      <CitationAnchor href={href} fileId={citationFileId} page={citationPage}>
+        {children}
+      </CitationAnchor>
+    );
+  }
 
   if (!file_id || !filename) {
     return (

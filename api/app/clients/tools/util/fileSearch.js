@@ -85,6 +85,63 @@ const primeFiles = async (options) => {
  * @param {boolean} [options.fileCitations=false] - Whether to include citation instructions
  * @returns
  */
+/**
+ * Converts legacy /query results (array of [docInfo, distance] pairs) into the
+ * context_groups format so both code paths can be handled uniformly.
+ */
+const _legacyResultsToGroups = (legacyData, fileId, filename) => {
+  if (!Array.isArray(legacyData)) return [];
+  return legacyData.map(([docInfo, distance], idx) => {
+    const meta = docInfo.metadata || {};
+    const sourceFile = (meta.source || filename || '').split('/').pop() || filename;
+    const page = meta.page || null;
+    return {
+      group_id: `legacy_${fileId}_${idx + 1}`,
+      file_id: fileId,
+      source_file: sourceFile,
+      pages: page ? [page] : [],
+      score: 1 - distance,
+      chunks: [
+        {
+          chunk_id: '',
+          text: docInfo.page_content,
+          score: 1 - distance,
+          metadata: {
+            file_id: fileId,
+            source_file: sourceFile,
+            page: page,
+            source_url: '',
+            image_ids: [],
+            images: [],
+            previous_chunk_id: null,
+            next_chunk_id: null,
+          },
+        },
+      ],
+      images: [],
+      sources: [{ source_file: sourceFile, page: page, source_url: '' }],
+    };
+  });
+};
+
+/**
+ * Builds a flat sources array from context_groups for the artifact metadata.
+ */
+const _groupsToSources = (groups, files) => {
+  const fileById = Object.fromEntries(files.map((f) => [f.file_id, f.filename]));
+  return groups.flatMap((group) =>
+    (group.sources || []).map((src) => ({
+      type: 'file',
+      fileId: group.file_id,
+      content: (group.chunks || []).map((c) => c.text).join('\n'),
+      fileName: fileById[group.file_id] || group.source_file,
+      relevance: group.score,
+      pages: src.page ? [src.page] : [],
+      pageRelevance: src.page ? { [src.page]: group.score } : {},
+    })),
+  );
+};
+
 const createFileSearchTool = async ({ userId, files, entity_id, fileCitations = false }) => {
   return tool(
     async ({ query }) => {
@@ -114,7 +171,47 @@ const createFileSearchTool = async ({ userId, files, entity_id, fileCitations = 
         return body;
       };
 
-      const queryPromises = files.map((file) =>
+      // Attempt multimodal query first; fall back to standard /query if unavailable or errored
+      const queryFile = async (file) => {
+        try {
+          const res = await axios.post(
+            `${process.env.RAG_API_URL}/query-multimodal`,
+            createQueryBody(file),
+            {
+              headers: {
+                Authorization: `Bearer ${jwtToken}`,
+                'Content-Type': 'application/json',
+              },
+            },
+          );
+          logger.info(
+            `[${Tools.file_search}] /query-multimodal response for file_id=${file.file_id}: type=${res.data?.type}, groups=${res.data?.context_groups?.length ?? 'n/a'}`,
+          );
+          if (res.data && res.data.type === 'multimodal_file_search_results') {
+            const hasRealChunks = (res.data.context_groups || []).some((g) =>
+              (g.chunks || []).some((c) => c.chunk_id),
+            );
+            logger.info(
+              `[${Tools.file_search}] multimodal accepted for file_id=${file.file_id}, hasRealChunks=${hasRealChunks}`,
+            );
+            return { type: 'multimodal', data: res.data, fileIndex: files.indexOf(file) };
+          }
+          logger.warn(`[${Tools.file_search}] /query-multimodal returned unexpected type=${res.data?.type} for file_id=${file.file_id}`);
+          return null;
+        } catch (err) {
+          // 404 means endpoint not deployed yet — fall back silently
+          if (err?.response?.status === 404) {
+            logger.debug(`[${Tools.file_search}] /query-multimodal 404 for file_id=${file.file_id} — rag_api not yet rebuilt, falling back to /query`);
+          } else {
+            logger.info(
+              `[${Tools.file_search}] /query-multimodal error (status=${err?.response?.status}), falling back to /query: ${err?.message}`,
+            );
+          }
+          return null;
+        }
+      };
+
+      const legacyQueryFile = (file) =>
         axios
           .post(`${process.env.RAG_API_URL}/query`, createQueryBody(file), {
             headers: {
@@ -125,9 +222,61 @@ const createFileSearchTool = async ({ userId, files, entity_id, fileCitations = 
           .catch((error) => {
             logger.error('Error encountered in `file_search` while querying file:', error);
             return null;
-          }),
-      );
+          });
 
+      // Run multimodal queries in parallel
+      const multimodalAttempts = await Promise.all(files.map(queryFile));
+      const hasMultimodal = multimodalAttempts.some((r) => r !== null);
+      logger.info(`[${Tools.file_search}] multimodal attempt results: hasMultimodal=${hasMultimodal}, files=${files.length}`);
+
+      if (hasMultimodal) {
+        // Merge context_groups from all files that responded with multimodal format
+        const allGroups = [];
+        for (let i = 0; i < files.length; i++) {
+          const attempt = multimodalAttempts[i];
+          if (attempt && attempt.type === 'multimodal') {
+            const groups = attempt.data.context_groups || [];
+            allGroups.push(...groups);
+          }
+        }
+
+        // For files that did NOT return multimodal, fall back to legacy and convert
+        const legacyFallbackFiles = files.filter((_, i) => !multimodalAttempts[i]);
+        if (legacyFallbackFiles.length > 0) {
+          const legacyResults = await Promise.all(legacyFallbackFiles.map(legacyQueryFile));
+          for (let i = 0; i < legacyFallbackFiles.length; i++) {
+            const result = legacyResults[i];
+            if (!result) continue;
+            const file = legacyFallbackFiles[i];
+            const legacyGroups = _legacyResultsToGroups(result.data, file.file_id, file.filename);
+            allGroups.push(...legacyGroups);
+          }
+        }
+
+        if (allGroups.length === 0) {
+          return [
+            'No content found in the files. The files may not have been processed correctly or you may need to refine your query.',
+            undefined,
+          ];
+        }
+
+        const multimodalPayload = {
+          type: 'multimodal_file_search_results',
+          version: 1,
+          context_groups: allGroups,
+        };
+
+        logger.debug(
+          `[${Tools.file_search}] multimodal result: ${allGroups.length} groups`,
+        );
+
+        const toolContent = JSON.stringify(multimodalPayload);
+        const sources = _groupsToSources(allGroups, files);
+        return [toolContent, { [Tools.file_search]: { sources, fileCitations } }];
+      }
+
+      // Legacy path: all files use standard /query
+      const queryPromises = files.map(legacyQueryFile);
       const results = await Promise.all(queryPromises);
       const validResults = results.filter((result) => result !== null);
 
@@ -138,11 +287,11 @@ const createFileSearchTool = async ({ userId, files, entity_id, fileCitations = 
       const formattedResults = validResults
         .flatMap((result, fileIndex) =>
           result.data.map(([docInfo, distance]) => ({
-            filename: docInfo.metadata.source.split('/').pop(),
+            filename: (docInfo.metadata?.source ?? '').split('/').pop() || files[fileIndex]?.filename || '',
             content: docInfo.page_content,
             distance,
             file_id: files[fileIndex]?.file_id,
-            page: docInfo.metadata.page || null,
+            page: docInfo.metadata?.page || null,
           })),
         )
         .sort((a, b) => a.distance - b.distance)

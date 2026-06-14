@@ -20,12 +20,14 @@ log = get_logger("classifier")
 class ClassificationResult(BaseModel):
     route: Literal["doc_kb", "structured_qa", "booking", "conversational", "out_of_scope"]
     rewritten_query: str
+    search_query: str = ""
+    """Short, focused RAG search query (1-2 sentences max). Falls back to rewritten_query if empty."""
 
 
 _INSTRUCTIONS = """
 You are a classification and query-rewrite agent for an enterprise assistant.
 
-The system supports three operational domains:
+The system supports these operational domains:
 
   • doc_kb        — ANY question that may be answered from documents, manuals, guides,
                     procedures, FAQs, policies, reports, or files attached by the user.
@@ -36,6 +38,14 @@ The system supports three operational domains:
                     quantitative data from a database.
   • booking       — explicit intent to create, view, modify or cancel a calendar appointment
                     or reservation.
+  • conversational — use when the user is:
+                    - asking for confirmation or clarification of the assistant's PREVIOUS
+                      answer (e.g. "sei sicuro?", "ne sei certo?", "davvero?", "perché?",
+                      "puoi spiegarmi meglio?", "cosa intendi?", "quindi?", "ok grazie",
+                      "are you sure?", "really?", "why?");
+                    - making small talk or a purely social remark;
+                    - asking a question entirely answered by the previous assistant turn
+                      that does NOT require searching new documents.
   • out_of_scope  — use ONLY when the request is clearly unrelated to any enterprise context
                     (e.g. personal life advice, creative writing, coding help unrelated to the
                     company). If there is any chance the question relates to internal knowledge,
@@ -43,11 +53,19 @@ The system supports three operational domains:
 
 Steps:
 1. Analyse the full conversation history.
-2. Rewrite the user's last request into a clear, self-contained query that retains all
-   relevant context (expand pronouns, include time ranges mentioned earlier, etc.).
-3. Choose the single best route. Default to doc_kb when uncertain.
+2. Choose the single best route. Default to doc_kb when the question is about documents;
+   default to conversational when the question is meta / social / a follow-up on the
+   assistant's previous answer.
+3. Set `rewritten_query` to a clear, self-contained version of the user's question that
+   retains all relevant context (expand pronouns, include time ranges mentioned earlier,
+   etc.). For conversational routes this can be a brief summary.
+4. Set `search_query` to a SHORT, keyword-focused query (1 sentence, max 10-12 words)
+   optimised for semantic vector search. It must capture only the core concept needed to
+   find the right document chunks — no elaborations, no requirements lists, no fillers.
+   Example: "come resettare IQOS 3 DUO" not "Come resettare il dispositivo IQOS? Fornire
+   la procedura passo-passo …". For non-doc_kb routes, set search_query = rewritten_query.
 
-Set rewritten_query to the improved query string (never empty).
+Set rewritten_query and search_query (never empty).
 """
 
 _classifier = Agent(

@@ -2,77 +2,311 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8" />
-  <title>Architettura Tecnica — LibreChat + agents-gateway</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Architettura Tecnica - LibreChat + rag_api + agents-gateway</title>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <style>
-    body { font-family: sans-serif; background: #f8f9fa; display: flex; flex-direction: column; align-items: center; padding: 32px; }
-    h1 { font-size: 1.3rem; color: #333; margin-bottom: 24px; }
-    #diagram { background: white; border-radius: 12px; padding: 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); max-width: 1100px; width: 100%; }
-    .btn-bar { margin-top: 20px; display: flex; gap: 12px; }
-    button { padding: 10px 22px; border: none; border-radius: 8px; cursor: pointer; font-size: 0.95rem; font-weight: 600; }
-    .btn-svg { background: #4f46e5; color: white; }
-    .btn-png { background: #0ea5e9; color: white; }
-    button:hover { opacity: 0.85; }
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #d8dee9;
+      --primary: #2563eb;
+      --secondary: #0f766e;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 28px;
+    }
+
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      font-size: 1.35rem;
+      line-height: 1.25;
+      margin: 0 0 8px;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.45;
+      max-width: 920px;
+    }
+
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+      min-width: 260px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 0.75rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    #diagram {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 26px;
+      box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+      overflow: auto;
+    }
+
+    .notes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .note {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .note h2 {
+      margin: 0 0 8px;
+      font-size: 0.9rem;
+      line-height: 1.3;
+    }
+
+    .note p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    .btn-bar {
+      margin-top: 18px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 9px 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: white;
+    }
+
+    .btn-svg { background: var(--primary); }
+    .btn-png { background: var(--secondary); }
+    button:hover { filter: brightness(0.95); }
+
+    @media (max-width: 920px) {
+      body { padding: 18px; }
+      header { flex-direction: column; }
+      .badges { justify-content: flex-start; min-width: 0; }
+      .notes { grid-template-columns: 1fr; }
+      #diagram { padding: 16px; }
+    }
   </style>
 </head>
 <body>
-  <h1>Architettura Tecnica — LibreChat + agents-gateway</h1>
-  <div id="diagram">
-    <div class="mermaid">
+  <main>
+    <header>
+      <div>
+        <h1>Architettura Tecnica - LibreChat, rag_api e agents-gateway</h1>
+        <p class="subtitle">
+          Flusso aggiornato per ingest multimodale, retrieval pgvector, sintesi doc_kb,
+          immagini, fonti pagina-specifiche e batterie di valutazione automatica.
+        </p>
+      </div>
+      <div class="badges" aria-label="Configurazione corrente">
+        <span class="badge">rag_api: 8000</span>
+        <span class="badge">agents-gateway: 8001</span>
+        <span class="badge">LibreChat API: 3080</span>
+        <span class="badge">pgvector: 5432</span>
+      </div>
+    </header>
+
+    <div id="diagram">
+      <div class="mermaid">
 flowchart TB
-    subgraph Browser["Browser (porta 3090)"]
-        UI["LibreChat Frontend\nReact SPA"]
+    subgraph Browser["Browser"]
+        UI["LibreChat Frontend<br/>React SPA<br/>porta 3090"]
     end
 
-    subgraph Docker["Docker Network"]
-        subgraph LibreChat["LibreChat Stack"]
-            API["LibreChat API\nNode.js · porta 3080"]
-            MONGO[("MongoDB")]
-            REDIS[("Redis")]
-            MEILI[("MeiliSearch")]
-        end
-
-        subgraph Gateway["agents-gateway · porta 8001"]
-            EP["POST /v1/chat/completions"]
-            GUARD["Guardrail Agent\ngpt-5-mini"]
-            CLASS["Classifier Agent\ngpt-5-mini"]
-
-            subgraph Agents["Specialized Agents"]
-                DOC["doc_kb\nFileSearch tool"]
-                STRUCT["structured_qa"]
-                BOOK["booking\nfunction_tools"]
-                CONV["conversational"]
-            end
-        end
-
-        GCal["google-calendar-mcp\nNode.js · porta 3000\n/mcp/events/create\n/mcp/calendars\n/mcp/events/upcoming"]
+    subgraph LibreChat["LibreChat Stack"]
+        API["LibreChat API<br/>Node.js<br/>porta 3080"]
+        MONGO[("MongoDB")]
+        REDIS[("Redis")]
+        MEILI[("MeiliSearch")]
+        FILES["File pipeline<br/>upload, metadata, file_search tool"]
+        OCR["Mistral OCR Layer<br/>structured_ocr JSON<br/>images saved in uploads/rag-images"]
     end
 
-    GAPI["Google Calendar API\nexternal"]
+    subgraph RAG["rag_api - porta 8000"]
+        EMBED["/embed<br/>plain text fallback"]
+        EMBED_S["/embed-structured<br/>multimodal chunks"]
+        HINTS["OpenAI domain hints<br/>generic ingest metadata"]
+        CHUNK["Chunk builder<br/>image placeholders<br/>headings, keywords, links"]
+        STORE["Store vectors<br/>ingest_run_id<br/>stale vector cleanup"]
+        QUERY_M["/query-multimodal<br/>context_groups + images + sources"]
+        RERANK["Generic rerank<br/>lexical + heading + image signals<br/>RAG_RERANK_MARGIN=0.04"]
+        EXPAND["Controlled neighbor expansion<br/>multi-step procedures<br/>previous/next chunk links"]
+    end
 
-    UI -->|"HTTP stream SSE"| API
-    API -->|"OpenAI-compat\n/v1/chat/completions"| EP
-    API --- MONGO & REDIS & MEILI
+    subgraph VectorDB["pgvector database - porta 5432"]
+        PG[("langchain_pg_embedding<br/>vectors + cmetadata")]
+    end
 
+    subgraph Gateway["agents-gateway - porta 8001"]
+        EP["POST /v1/chat/completions<br/>OpenAI-compatible"]
+        GUARD["Guardrail Agent<br/>gpt-5-mini"]
+        CLASS["Classifier Agent<br/>route + search_query"]
+        PARSE["multimodal.py<br/>parse tool result<br/>images_by_id + sources"]
+        POST["Post-processing<br/>placeholder to image URL<br/>dedupe images<br/>Sources section"]
+        DOC["doc_kb Agent<br/>DOC_KB_MODEL<br/>default gpt-5-mini"]
+        STRUCT["structured_qa"]
+        BOOK["booking<br/>function_tools"]
+        CONV["conversational"]
+    end
+
+    subgraph Tests["Evaluation framework"]
+        RAG_EVAL["utils/rag_eval.py<br/>retrieval precision<br/>top pages + image presence + noise"]
+        DOC_EVAL["utils/doc_agent_eval.py<br/>LibreChat round-2 simulation<br/>answer + sources + images"]
+        REPORT["utils/rag_ingest_report.py<br/>DB quality report<br/>legacy vs multimodal chunks"]
+        EXPLORER["utils/pgvector_explorer<br/>manual DB + semantic inspection"]
+    end
+
+    GCal["google-calendar-mcp<br/>porta 3000"]
+    GAPI["Google Calendar API<br/>external"]
+    OAI["OpenAI API<br/>external"]
+
+    UI -->|"SSE chat stream"| API
+    API --- MONGO
+    API --- REDIS
+    API --- MEILI
+    API --> FILES
+    FILES --> OCR
+
+    OCR -->|"structured OCR"| EMBED_S
+    OCR -->|"fallback text"| EMBED
+    EMBED_S --> CHUNK
+    CHUNK --> HINTS
+    HINTS --> STORE
+    STORE --> PG
+    EMBED --> PG
+
+    API -->|"Round 1<br/>tools include file_search"| EP
     EP --> GUARD
-    GUARD -->|allowed| CLASS
-    CLASS -->|route| DOC & STRUCT & BOOK & CONV
+    GUARD -->|"allowed"| CLASS
+    CLASS -->|"route=doc_kb<br/>emit file_search tool_call"| API
+    CLASS --> STRUCT
+    CLASS --> BOOK
+    CLASS --> CONV
 
+    API -->|"file_search request"| QUERY_M
+    QUERY_M -->|"vector search"| PG
+    QUERY_M --> RERANK
+    RERANK --> EXPAND
+    EXPAND -->|"multimodal_file_search_results JSON"| API
+
+    API -->|"Round 2<br/>role=tool result"| EP
+    EP --> PARSE
+    PARSE -->|"structured context"| DOC
+    DOC -->|"Responses API"| OAI
+    DOC --> POST
+    POST -->|"final answer<br/>images + Sources"| API
+    API --> UI
+
+    STRUCT -->|"Responses API"| OAI
+    CONV -->|"Responses API"| OAI
+    CLASS -->|"Responses API"| OAI
+    GUARD -->|"Responses API"| OAI
     BOOK -->|"httpx REST"| GCal
     GCal -->|"OAuth 2.0"| GAPI
 
-    DOC -->|"Responses API\nfile_search"| OAI["OpenAI API\nexternal"]
-    STRUCT & CONV -->|"Responses API"| OAI
-    CLASS & GUARD -->|"Responses API"| OAI
+    RAG_EVAL --> QUERY_M
+    DOC_EVAL --> QUERY_M
+    DOC_EVAL --> EP
+    REPORT --> PG
+    EXPLORER --> PG
+    EXPLORER --> QUERY_M
+      </div>
     </div>
-  </div>
-  <div class="btn-bar">
-    <button class="btn-svg" onclick="downloadSVG()">⬇ Scarica SVG</button>
-    <button class="btn-png" onclick="downloadPNG()">⬇ Scarica PNG</button>
-  </div>
+
+    <section class="notes" aria-label="Note operative">
+      <article class="note">
+        <h2>Retrieval</h2>
+        <p>
+          La ricerca vettoriale usa pgvector, rerank generico e filtro stretto.
+          Per procedure multi-step viene aggiunto solo contesto adiacente collegato.
+        </p>
+      </article>
+      <article class="note">
+        <h2>Sintesi agente</h2>
+        <p>
+          doc_kb riceve gia' context_groups da LibreChat, risponde solo sul contesto,
+          preserva step e condizioni multiple, poi il gateway aggiunge immagini e fonti.
+        </p>
+      </article>
+      <article class="note">
+        <h2>Verifica</h2>
+        <p>
+          rag_eval misura precisione del retrieval. doc_agent_eval simula LibreChat round 2
+          e verifica risposta, immagini e fonti con pagina precisa.
+        </p>
+      </article>
+    </section>
+
+    <div class="btn-bar">
+      <button class="btn-svg" onclick="downloadSVG()">Scarica SVG</button>
+      <button class="btn-png" onclick="downloadPNG()">Scarica PNG</button>
+    </div>
+  </main>
 
   <script>
-    mermaid.initialize({ startOnLoad: true, theme: 'default', flowchart: { useMaxWidth: false } });
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      flowchart: {
+        useMaxWidth: false,
+        curve: 'basis'
+      }
+    });
 
     function getSVGEl() {
       return document.querySelector('#diagram svg');
@@ -86,6 +320,7 @@ flowchart TB
       a.href = URL.createObjectURL(blob);
       a.download = '01_architettura_tecnica.svg';
       a.click();
+      URL.revokeObjectURL(a.href);
     }
 
     function downloadPNG() {

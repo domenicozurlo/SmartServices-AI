@@ -179,5 +179,6 @@ hive-mind-prompt-*.txt
 CLAUDE.md
 .gsd
 rag_api-main/
+azure-search-openai-demo-main/
 agents_workflow_examples/
 google_token.json

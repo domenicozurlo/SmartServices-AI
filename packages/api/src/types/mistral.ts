@@ -79,4 +79,35 @@ export interface MistralOCRUploadResult {
   filepath: string;
   text: string;
   images: string[];
+  /** Structured per-page OCR output — present when multimodal processing succeeded */
+  structured_ocr?: StructuredOCRResult;
+}
+
+/** Saved image record produced during OCR post-processing */
+export interface StructuredOCRImageRecord {
+  image_id: string;
+  url: string;
+  caption: string;
+  image_summary: string;
+  width: number | null;
+  height: number | null;
+  mime_type: string;
+  size_bytes: number;
+  bbox: null | { x: number; y: number; w: number; h: number };
+  image_hash?: string;
+}
+
+/** Single page of a structured OCR result */
+export interface StructuredOCRPage {
+  page: number;
+  markdown: string;
+  images: StructuredOCRImageRecord[];
+  dimensions: Record<string, unknown>;
+}
+
+/** Full structured OCR result with per-page data and image records */
+export interface StructuredOCRResult {
+  file_id: string;
+  source_file: string;
+  pages: StructuredOCRPage[];
 }

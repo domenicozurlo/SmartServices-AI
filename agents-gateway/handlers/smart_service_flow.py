@@ -80,6 +80,7 @@ class RouteResult:
     route: str          # doc_kb | structured_qa | booking | out_of_scope | blocked | title
     rewritten_query: str = ""
     message: str = ""   # rejection text when route is blocked or out_of_scope
+    search_query: str = ""  # short RAG search query; falls back to rewritten_query when empty
 
 
 async def get_route_and_query(messages: list) -> RouteResult:
@@ -112,7 +113,11 @@ async def get_route_and_query(messages: list) -> RouteResult:
         log.warning("workflow.blocked", reason="out_of_scope")
         return RouteResult(route="out_of_scope", rewritten_query=classification.rewritten_query, message=_OUT_OF_SCOPE_MSG)
 
-    return RouteResult(route=classification.route, rewritten_query=classification.rewritten_query)
+    return RouteResult(
+        route=classification.route,
+        rewritten_query=classification.rewritten_query,
+        search_query=classification.search_query or "",
+    )
 
 
 async def smart_service_flow(messages: list) -> AsyncGenerator[str, None]:
