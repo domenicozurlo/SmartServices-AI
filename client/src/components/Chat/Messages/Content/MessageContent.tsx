@@ -11,20 +11,13 @@ import Thinking from './Parts/Thinking';
 import { useLocalize } from '~/hooks';
 import Container from './Container';
 import Markdown from './Markdown';
+import { parseTransientThinking } from './thinking';
 import { cn } from '~/utils';
 import store from '~/store';
 
 const ERROR_CONNECTION_TEXT = 'Error connecting to server, try refreshing the page.';
 const DELAYED_ERROR_TIMEOUT = 5500;
 const UNFINISHED_DELAY = 250;
-
-const parseThinkingContent = (text: string) => {
-  const thinkingMatch = text.match(/:::thinking([\s\S]*?):::/);
-  return {
-    thinkingContent: thinkingMatch ? thinkingMatch[1].trim() : '',
-    regularContent: thinkingMatch ? text.replace(/:::thinking[\s\S]*?:::/, '').trim() : text,
-  };
-};
 
 const LoadingFallback = () => (
   <div className="text-message mb-[0.625rem] flex min-h-[20px] flex-col items-start gap-3 overflow-visible">
@@ -146,8 +139,11 @@ const MessageContent = ({
   const { message } = props;
   const { messageId } = message;
 
-  const { thinkingContent, regularContent } = useMemo(() => parseThinkingContent(text), [text]);
   const showRegularCursor = useMemo(() => isLast && isSubmitting, [isLast, isSubmitting]);
+  const { thinkingContent, regularContent } = useMemo(
+    () => parseTransientThinking(text, showRegularCursor),
+    [text, showRegularCursor],
+  );
 
   const unfinishedMessage = useMemo(
     () =>
@@ -171,7 +167,7 @@ const MessageContent = ({
 
   return (
     <>
-      {thinkingContent.length > 0 && (
+      {showRegularCursor && thinkingContent.length > 0 && (
         <Thinking key={`thinking-${messageId}`}>{thinkingContent}</Thinking>
       )}
       <DisplayMessage

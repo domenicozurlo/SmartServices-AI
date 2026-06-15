@@ -73,6 +73,11 @@ _MODEL_SETTINGS = ModelSettings(
 )
 
 
+def _include_reasoning() -> bool:
+    value = os.getenv("BOOKING_INCLUDE_REASONING", os.getenv("AGENTS_GATEWAY_INCLUDE_REASONING", "false"))
+    return value.lower() in ("true", "1", "yes")
+
+
 def _make_calendar_tools(base_url: str) -> list:
     @function_tool
     async def list_upcoming_events(max_results: int = 10) -> str:
@@ -153,12 +158,28 @@ async def run_booking(
         model_settings=_MODEL_SETTINGS,
     )
 
+    include_reasoning = _include_reasoning()
+    reasoning_open = False
+    answer_started = False
     streamed = Runner.run_streamed(agent, input_messages)
     async for event in streamed.stream_events():
         if not isinstance(event, RawResponsesStreamEvent):
             continue
         raw = event.data
-        if getattr(raw, "type", None) == "response.output_text.delta":
+        event_type = getattr(raw, "type", None)
+        if event_type == "response.reasoning_summary_text.delta":
+            delta = getattr(raw, "delta", "")
+            if delta and include_reasoning:
+                if not reasoning_open:
+                    yield ":::thinking\n"
+                    reasoning_open = True
+                yield delta
+        elif event_type == "response.output_text.delta":
             delta = getattr(raw, "delta", "")
             if delta:
+                if reasoning_open and not answer_started:
+                    yield "\n:::\n\n"
+                answer_started = True
                 yield delta
+    if reasoning_open and not answer_started:
+        yield "\n:::\n\n"

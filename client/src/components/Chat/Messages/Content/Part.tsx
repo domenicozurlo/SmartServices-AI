@@ -22,6 +22,7 @@ import {
   SubagentCall,
 } from './Parts';
 import { ErrorMessage } from './MessageContent';
+import Thinking from './Parts/Thinking';
 import RetrievalCall from './RetrievalCall';
 import { getCachedPreview } from '~/utils';
 import AgentHandoff from './AgentHandoff';
@@ -31,6 +32,7 @@ import WebSearch from './WebSearch';
 import ToolCall from './ToolCall';
 import Image from './Image';
 import { isBashProgrammaticToolCall } from './routing';
+import { parseTransientThinking } from './thinking';
 
 type PartProps = {
   part?: TMessageContentParts;
@@ -85,11 +87,14 @@ const Part = memo(function Part({
     if (typeof text !== 'string') {
       return null;
     }
-    if (part.tool_call_ids != null && !text) {
+    const showTransientThinking = !isCreatedByUser && isSubmitting && isLast === true && showCursor;
+    const { thinkingContent, regularContent } = parseTransientThinking(text, showTransientThinking);
+
+    if (part.tool_call_ids != null && !regularContent && !thinkingContent) {
       return null;
     }
     /** Handle whitespace-only text to avoid layout shift */
-    if (text.length > 0 && /^\s*$/.test(text)) {
+    if (regularContent.length > 0 && /^\s*$/.test(regularContent)) {
       /** Show placeholder for whitespace-only last part during streaming */
       if (isLast && showCursor) {
         return (
@@ -103,10 +108,22 @@ const Part = memo(function Part({
         return null;
       }
     }
+    if (!regularContent && !thinkingContent) {
+      return null;
+    }
     return (
-      <Container>
-        <Text text={text} isCreatedByUser={isCreatedByUser} showCursor={showCursor} />
-      </Container>
+      <>
+        {showTransientThinking && thinkingContent.length > 0 && <Thinking>{thinkingContent}</Thinking>}
+        {regularContent.length > 0 && (
+          <Container>
+            <Text
+              text={regularContent}
+              isCreatedByUser={isCreatedByUser}
+              showCursor={showCursor}
+            />
+          </Container>
+        )}
+      </>
     );
   } else if (part.type === ContentTypes.THINK) {
     const reasoning = typeof part.think === 'string' ? part.think : part.think?.value;

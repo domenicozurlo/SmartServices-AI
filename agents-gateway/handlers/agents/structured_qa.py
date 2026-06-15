@@ -1,5 +1,6 @@
 """Structured Data QA Agent."""
 
+import asyncio
 import os
 from typing import AsyncGenerator
 
@@ -31,6 +32,17 @@ def _render_response(response) -> str:
     return to_chat_text(response)
 
 
+async def _yield_rendered_response(response) -> AsyncGenerator[str, None]:
+    text = _render_response(response)
+    chunk_chars = max(1, int(os.getenv("STRUCTURED_QA_STREAM_CHUNK_CHARS", "80")))
+    delay_seconds = max(0.0, float(os.getenv("STRUCTURED_QA_STREAM_CHUNK_DELAY_SECONDS", "0.01")))
+
+    for start in range(0, len(text), chunk_chars):
+        yield text[start:start + chunk_chars]
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+
+
 async def run_structured_qa(
     conversation: list,
     rewritten_query: str,
@@ -55,7 +67,8 @@ async def run_structured_qa(
     if intent.unsupported_request:
         response = unsupported_response(adapter.data_source)
         log.info("structured_qa.response.generated", status="unsupported")
-        yield _render_response(response)
+        async for chunk in _yield_rendered_response(response):
+            yield chunk
         return
 
     if intent.requires_clarification:
@@ -65,7 +78,8 @@ async def run_structured_qa(
             intent.parameters,
         )
         log.info("structured_qa.response.generated", status="clarification")
-        yield _render_response(response)
+        async for chunk in _yield_rendered_response(response):
+            yield chunk
         return
 
     try:
@@ -74,13 +88,15 @@ async def run_structured_qa(
         response = unsupported_response(adapter.data_source)
         log.warning("structured_qa.tool_selected", allowed=False)
         log.info("structured_qa.response.generated", status="tool_not_allowed")
-        yield _render_response(response)
+        async for chunk in _yield_rendered_response(response):
+            yield chunk
         return
     except StructuredQaValidationError as exc:
         response = validation_error_response(adapter.data_source, str(exc), intent.parameters)
         log.warning("structured_qa.tool_selected", allowed=False, reason=str(exc))
         log.info("structured_qa.response.generated", status="validation_error")
-        yield _render_response(response)
+        async for chunk in _yield_rendered_response(response):
+            yield chunk
         return
 
     log.info(
@@ -114,7 +130,8 @@ async def run_structured_qa(
         )
         response = adapter_error_response(adapter.data_source, call)
         log.info("structured_qa.response.generated", status="adapter_error")
-        yield _render_response(response)
+        async for chunk in _yield_rendered_response(response):
+            yield chunk
         return
 
     response = success_response(adapter.data_source, call, result, rewritten_query)
@@ -123,4 +140,5 @@ async def run_structured_qa(
         status="empty" if not result.rows else "success",
         data_source=adapter.data_source,
     )
-    yield _render_response(response)
+    async for chunk in _yield_rendered_response(response):
+        yield chunk

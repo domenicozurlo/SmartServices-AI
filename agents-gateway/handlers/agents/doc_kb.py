@@ -24,7 +24,6 @@ from handlers.multimodal import (
     parse_tool_results,
     build_images_by_id,
     select_contextual_images,
-    replace_valid_image_placeholders,
     build_doc_kb_context,
     build_sources,
     build_markdown_response,
@@ -78,6 +77,96 @@ _doc_agent = Agent(
         reasoning=Reasoning(effort="low", summary="detailed"),
     ),
 )
+
+
+def _include_reasoning() -> bool:
+    return os.getenv("DOC_KB_INCLUDE_REASONING", "false").lower() in ("true", "1", "yes")
+
+
+def _caption_for_stream_image(img: Dict[str, Any], preceding_text: str = "") -> str:
+    raw = (img.get("image_summary") or img.get("caption") or "").strip()
+    if raw and "." not in raw[-6:]:
+        return raw
+    if preceding_text:
+        for line in reversed(preceding_text.splitlines()):
+            line = line.strip().lstrip("#* ")
+            if len(line) > 5:
+                return line[:100]
+    page = img.get("page")
+    return f"Figura - pagina {page}" if page else "Figura"
+
+
+def _replace_stream_image_id(
+    image_id: str,
+    images_by_id: Dict[str, Any],
+    replaced_ids: List[str],
+    preceding_text: str,
+) -> str:
+    img = images_by_id.get(image_id)
+    if not img or not img.get("url") or image_id in replaced_ids:
+        return ""
+    replaced_ids.append(image_id)
+    caption = _caption_for_stream_image(img, preceding_text)
+    return f"\n\n![{caption}]({img['url']})\n"
+
+
+def _partial_marker_suffix_len(text: str) -> int:
+    marker = "<image_id>"
+    return max(
+        (idx for idx in range(1, len(marker)) if text.endswith(marker[:idx])),
+        default=0,
+    )
+
+
+def _consume_image_placeholders(
+    state: Dict[str, str],
+    delta: str,
+    images_by_id: Dict[str, Any],
+    replaced_ids: List[str],
+    force: bool = False,
+) -> List[str]:
+    start_tag = "<image_id>"
+    end_tag = "</image_id>"
+    buffer = state.get("buffer", "") + delta
+    preceding = state.get("preceding", "")
+    outputs: List[str] = []
+
+    while buffer:
+        start = buffer.find(start_tag)
+        if start == -1:
+            keep = 0 if force else _partial_marker_suffix_len(buffer)
+            safe = buffer[:-keep] if keep else buffer
+            if safe:
+                outputs.append(safe)
+                preceding += safe
+            buffer = buffer[-keep:] if keep else ""
+            break
+
+        if start > 0:
+            safe = buffer[:start]
+            outputs.append(safe)
+            preceding += safe
+            buffer = buffer[start:]
+            continue
+
+        end = buffer.find(end_tag)
+        if end == -1:
+            if force:
+                outputs.append(buffer)
+                preceding += buffer
+                buffer = ""
+            break
+
+        image_id = buffer[len(start_tag):end]
+        replacement = _replace_stream_image_id(image_id, images_by_id, replaced_ids, preceding)
+        if replacement:
+            outputs.append(replacement)
+            preceding += replacement
+        buffer = buffer[end + len(end_tag):]
+
+    state["buffer"] = buffer
+    state["preceding"] = preceding
+    return outputs
 
 
 async def run_doc_kb(
@@ -134,9 +223,16 @@ async def run_doc_kb(
             }
         ]
 
-        # Collect the full answer + reasoning summary, then post-process (non-streaming internally)
+        # Stream the model response while replacing image placeholders as soon
+        # as complete tags arrive. This preserves inline images without waiting
+        # for the full answer.
         full_answer_chunks: List[str] = []
         reasoning_chunks: List[str] = []
+        replaced_ids: List[str] = []
+        image_stream_state = {"buffer": "", "preceding": ""}
+        include_reasoning = _include_reasoning()
+        reasoning_open = False
+        answer_started = False
         streamed = Runner.run_streamed(_doc_agent, input_messages)
         async for event in streamed.stream_events():
             if not isinstance(event, RawResponsesStreamEvent):
@@ -147,13 +243,39 @@ async def run_doc_kb(
                 delta = getattr(raw, "delta", "")
                 if delta:
                     reasoning_chunks.append(delta)
+                    if include_reasoning:
+                        if not reasoning_open:
+                            yield ":::thinking\n"
+                            reasoning_open = True
+                        yield delta
             elif event_type == "response.output_text.delta":
                 delta = getattr(raw, "delta", "")
                 if delta:
+                    if reasoning_open and not answer_started:
+                        yield "\n:::\n\n"
+                    answer_started = True
                     full_answer_chunks.append(delta)
+                    for text in _consume_image_placeholders(
+                        image_stream_state,
+                        delta,
+                        images_by_id or {},
+                        replaced_ids,
+                    ):
+                        yield text
 
         raw_answer = "".join(full_answer_chunks)
         reasoning_text = "".join(reasoning_chunks).strip()
+        if reasoning_open and not answer_started:
+            yield "\n:::\n\n"
+
+        for text in _consume_image_placeholders(
+            image_stream_state,
+            "",
+            images_by_id or {},
+            replaced_ids,
+            force=True,
+        ):
+            yield text
 
         log.info(
             "doc_kb.agent_response",
@@ -175,41 +297,31 @@ async def run_doc_kb(
         _NOT_FOUND_SENTINEL = "Le informazioni richieste non sono presenti nei documenti forniti"
         if _NOT_FOUND_SENTINEL in raw_answer:
             log.info("doc_kb.not_found", suppressing_images=True)
-            yield _NOT_FOUND_SENTINEL
             return
-
-        # Replace valid placeholders with markdown images; strip invalid ones
-        answer_with_images, replaced_ids = replace_valid_image_placeholders(
-            raw_answer, images_by_id or {}
-        )
 
         # Select up to 2 contextual images not already inlined
         selected_images = select_contextual_images(
             context_groups, images_by_id or {}, max_images=2
         )
 
-        final = build_markdown_response(
-            answer=answer_with_images,
+        appendix = build_markdown_response(
+            answer="",
             appended_images=selected_images,
             replaced_image_ids=replaced_ids,
             sources=sources or [],
         )
-
-        # Keep final document answers concise by default. Reasoning can still be
-        # exposed for diagnostics when explicitly enabled in the gateway env.
-        if reasoning_text and os.getenv("DOC_KB_INCLUDE_REASONING", "false").lower() in ("true", "1", "yes"):
-            final = f":::thinking\n{reasoning_text}\n:::\n\n{final}"
 
         log.info(
             "doc_kb.multimodal_final",
             replaced_images=len(replaced_ids),
             appended_images=len(selected_images),
             sources=len(sources or []),
-            final_len=len(final),
-            has_img_markdown="![](" in final,
-            final_preview=final[:400],
+            appendix_len=len(appendix),
+            has_img_markdown="![](" in appendix,
+            appendix_preview=appendix[:400],
         )
-        yield final
+        if appendix:
+            yield f"\n\n{appendix}"
         return
 
     # Legacy path: conversation already contains injected context
@@ -220,14 +332,30 @@ async def run_doc_kb(
             "content": [{"type": "input_text", "text": rewritten_query}],
         },
     ]
+    include_reasoning = _include_reasoning()
+    reasoning_open = False
+    answer_started = False
     streamed = Runner.run_streamed(_doc_agent, input_messages)
     async for event in streamed.stream_events():
         if not isinstance(event, RawResponsesStreamEvent):
             continue
         raw = event.data
-        if getattr(raw, "type", None) == "response.output_text.delta":
+        event_type = getattr(raw, "type", None)
+        if event_type == "response.reasoning_summary_text.delta":
+            delta = getattr(raw, "delta", "")
+            if delta and include_reasoning:
+                if not reasoning_open:
+                    yield ":::thinking\n"
+                    reasoning_open = True
+                yield delta
+        elif event_type == "response.output_text.delta":
             delta = getattr(raw, "delta", "")
             if delta:
+                if reasoning_open and not answer_started:
+                    yield "\n:::\n\n"
+                answer_started = True
                 yield delta
+    if reasoning_open and not answer_started:
+        yield "\n:::\n\n"
 
 
