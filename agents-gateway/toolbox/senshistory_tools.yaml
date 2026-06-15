@@ -1,0 +1,257 @@
+kind: source
+name: irrifarm-ai-mysql
+type: mysql
+host: ${MYSQL_HOST}
+port: ${MYSQL_PORT:3306}
+database: ${MYSQL_DATABASE:irrifarm_ai}
+user: ${MYSQL_USER}
+password: ${MYSQL_PASSWORD}
+
+---
+kind: tool
+name: get_latest_sensor_readings
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns the latest senshistory readings, optionally filtered by motherboard serial.
+parameters:
+  - name: seriale
+    type: string
+    description: Optional MBO_SN motherboard serial. Use an empty string for all motherboards.
+  - name: limit
+    type: integer
+    description: Maximum number of rows to return.
+statement: |
+  SELECT
+    SNS_ID, MBO_SN, SNS_DtEvent, SNS_IdSlave, SNS_TempAmb, SNS_UmdAmb,
+    SNS_Umd1Liv, SNS_Umd2Liv, SNS_Umd3Liv, SNS_BattLiv, SNS_RFLiv,
+    SNS_PH, SNS_EC, SNS_ARK, SNS_ETL, SNS_ETD, SNS_LitersCount, SNS_Type
+  FROM senshistory
+  WHERE MBO_SN = COALESCE(NULLIF(?, ''), MBO_SN)
+  ORDER BY SNS_DtEvent DESC
+  LIMIT ?;
+
+---
+kind: tool
+name: get_sensor_readings_by_period
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns senshistory readings for a date range, optionally filtered by motherboard serial.
+parameters:
+  - name: seriale
+    type: string
+  - name: fromDate
+    type: string
+  - name: toDate
+    type: string
+  - name: limit
+    type: integer
+statement: |
+  SELECT
+    SNS_ID, MBO_SN, SNS_DtEvent, SNS_IdSlave, SNS_TempAmb, SNS_UmdAmb,
+    SNS_Umd1Liv, SNS_Umd2Liv, SNS_Umd3Liv, SNS_Umd4Liv, SNS_Umd5Liv,
+    SNS_Umd6Liv, SNS_BattLiv, SNS_RFLiv, SNS_PH, SNS_EC, SNS_ARK,
+    SNS_ETL, SNS_ETD, SNS_LitersCount, SNS_Type
+  FROM senshistory
+  WHERE MBO_SN = COALESCE(NULLIF(?, ''), MBO_SN)
+    AND SNS_DtEvent >= ?
+    AND SNS_DtEvent < ?
+  ORDER BY SNS_DtEvent
+  LIMIT ?;
+
+---
+kind: tool
+name: get_daily_temperature_humidity
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns daily average air temperature and humidity for a motherboard serial.
+parameters:
+  - name: seriale
+    type: string
+  - name: fromDate
+    type: string
+  - name: toDate
+    type: string
+statement: |
+  SELECT
+    MBO_SN,
+    DATE(SNS_DtEvent) AS day,
+    COUNT(*) AS readings_count,
+    AVG(SNS_TempAmb) AS avg_temp,
+    AVG(SNS_UmdAmb) AS avg_air_humidity
+  FROM senshistory
+  WHERE MBO_SN = ?
+    AND SNS_DtEvent >= ?
+    AND SNS_DtEvent < ?
+  GROUP BY MBO_SN, DATE(SNS_DtEvent)
+  ORDER BY day;
+
+---
+kind: tool
+name: get_soil_moisture_summary
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns daily average soil humidity levels for a motherboard serial.
+parameters:
+  - name: seriale
+    type: string
+  - name: fromDate
+    type: string
+  - name: toDate
+    type: string
+statement: |
+  SELECT
+    MBO_SN,
+    DATE(SNS_DtEvent) AS day,
+    COUNT(*) AS readings_count,
+    AVG(SNS_Umd1Liv) AS avg_soil_humidity_1,
+    AVG(SNS_Umd2Liv) AS avg_soil_humidity_2,
+    AVG(SNS_Umd3Liv) AS avg_soil_humidity_3,
+    AVG(SNS_Umd4Liv) AS avg_soil_humidity_4,
+    AVG(SNS_Umd5Liv) AS avg_soil_humidity_5,
+    AVG(SNS_Umd6Liv) AS avg_soil_humidity_6
+  FROM senshistory
+  WHERE MBO_SN = ?
+    AND SNS_DtEvent >= ?
+    AND SNS_DtEvent < ?
+  GROUP BY MBO_SN, DATE(SNS_DtEvent)
+  ORDER BY day;
+
+---
+kind: tool
+name: get_battery_status
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns latest battery readings and a low-battery status for a motherboard serial.
+parameters:
+  - name: seriale
+    type: string
+  - name: threshold
+    type: integer
+  - name: limit
+    type: integer
+statement: |
+  SELECT
+    MBO_SN,
+    SNS_DtEvent,
+    SNS_BattLiv,
+    CASE WHEN SNS_BattLiv > 0 AND SNS_BattLiv < ? THEN 'LOW' ELSE 'OK' END AS status
+  FROM senshistory
+  WHERE MBO_SN = ?
+  ORDER BY SNS_DtEvent DESC
+  LIMIT ?;
+
+---
+kind: tool
+name: get_rf_signal_status
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns latest RF signal readings and a low-signal status for a motherboard serial.
+parameters:
+  - name: seriale
+    type: string
+  - name: threshold
+    type: integer
+  - name: limit
+    type: integer
+statement: |
+  SELECT
+    MBO_SN,
+    SNS_DtEvent,
+    SNS_RFLiv,
+    CASE WHEN SNS_RFLiv > 0 AND SNS_RFLiv < ? THEN 'LOW' ELSE 'OK' END AS status
+  FROM senshistory
+  WHERE MBO_SN = ?
+  ORDER BY SNS_DtEvent DESC
+  LIMIT ?;
+
+---
+kind: tool
+name: get_ph_ec_trend
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns pH and EC readings for a motherboard serial and date range.
+parameters:
+  - name: seriale
+    type: string
+  - name: fromDate
+    type: string
+  - name: toDate
+    type: string
+  - name: limit
+    type: integer
+statement: |
+  SELECT
+    MBO_SN,
+    SNS_DtEvent,
+    SNS_PH,
+    SNS_EC
+  FROM senshistory
+  WHERE MBO_SN = ?
+    AND SNS_DtEvent >= ?
+    AND SNS_DtEvent < ?
+  ORDER BY SNS_DtEvent
+  LIMIT ?;
+
+---
+kind: tool
+name: get_daily_rain_et
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns daily rainfall and evapotranspiration values for a motherboard serial.
+parameters:
+  - name: seriale
+    type: string
+  - name: fromDate
+    type: string
+  - name: toDate
+    type: string
+statement: |
+  SELECT
+    MBO_SN,
+    DATE(SNS_DtEvent) AS day,
+    COUNT(*) AS readings_count,
+    SUM(SNS_ARK) AS total_rain,
+    AVG(SNS_ETL) AS avg_eto_hour,
+    AVG(SNS_ETD) AS avg_eto_24h
+  FROM senshistory
+  WHERE MBO_SN = ?
+    AND SNS_DtEvent >= ?
+    AND SNS_DtEvent < ?
+  GROUP BY MBO_SN, DATE(SNS_DtEvent)
+  ORDER BY day;
+
+---
+kind: tool
+name: get_data_quality_summary
+type: mysql-sql
+source: irrifarm-ai-mysql
+description: Returns a data quality summary for senshistory.
+parameters: []
+statement: |
+  SELECT
+    COUNT(*) AS total_records,
+    SUM(CASE WHEN SNS_DtEvent IS NULL THEN 1 ELSE 0 END) AS records_without_event_date,
+    ROUND(SUM(CASE WHEN SNS_DtEvent IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS percentage_without_event_date,
+    SUM(CASE
+      WHEN SNS_TempAmb = 0
+       AND SNS_UmdAmb = 0
+       AND SNS_Umd1Liv = 0
+       AND SNS_BattLiv = 0
+      THEN 1 ELSE 0
+    END) AS records_with_core_fields_zero,
+    COUNT(DISTINCT MBO_SN) AS distinct_motherboards
+  FROM senshistory;
+
+---
+kind: toolset
+name: senshistory_readonly
+tools:
+  - get_latest_sensor_readings
+  - get_sensor_readings_by_period
+  - get_daily_temperature_humidity
+  - get_soil_moisture_summary
+  - get_battery_status
+  - get_rf_signal_status
+  - get_ph_ec_trend
+  - get_daily_rain_et
+  - get_data_quality_summary

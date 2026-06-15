@@ -1,191 +1,126 @@
-"""
-Structured Data QA Agent.
+"""Structured Data QA Agent."""
 
-Follows the pattern from agents_workflow_examples/structured_data_qa.py:
-  1. Domain selector → which data domain the question belongs to.
-  2. Query creator   → translates NL question to a structured query.
-  3. Query executor  → runs / simulates the query and returns results.
-  4. Synthesiser     → formats the result for the end user.
+import os
+from typing import AsyncGenerator
 
-Extend the domain list and ontologies to match your actual data warehouse.
-"""
-
-from typing import AsyncGenerator, Literal
-
-from pydantic import BaseModel
-
-from agents import Agent, ModelSettings, Runner
-from agents.stream_events import RawResponsesStreamEvent
-from openai.types.shared.reasoning import Reasoning
 from logger import get_logger
+from handlers.structured_qa.adapter import StructuredQaAdapterError, build_adapter
+from handlers.structured_qa.config import load_config
+from handlers.structured_qa.formatter import (
+    adapter_error_response,
+    clarification_response,
+    success_response,
+    to_chat_text,
+    to_json,
+    unsupported_response,
+    validation_error_response,
+)
+from handlers.structured_qa.planner import plan_structured_qa
+from handlers.structured_qa.validator import (
+    StructuredQaToolNotAllowedError,
+    StructuredQaValidationError,
+    validate_tool_call,
+)
 
 log = get_logger("structured_qa")
 
 
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
+def _render_response(response) -> str:
+    if os.getenv("STRUCTURED_QA_OUTPUT_FORMAT", "text").strip().lower() == "json":
+        return to_json(response)
+    return to_chat_text(response)
 
-class DomainSelection(BaseModel):
-    domain: Literal["commerce", "personnel", "other"]
-
-
-class QueryPlan(BaseModel):
-    query: str
-    explanation: str
-
-
-# ---------------------------------------------------------------------------
-# Agents
-# ---------------------------------------------------------------------------
-
-_DOMAIN_SELECTOR_INSTRUCTIONS = """
-You classify a user's natural language question into a data domain.
-
-Domains:
-• commerce   — sales, orders, GMV, revenue, customers, merchants, payment methods,
-               refunds, chargebacks, channels, AOV, conversion.
-• personnel  — headcount, employees, departments, payroll, benefits, overtime,
-               hiring, terminations, leave, compensation.
-• other      — does not fit either domain.
-
-Respond with exactly one of: "commerce", "personnel", "other".
-"""
-
-_domain_selector = Agent(
-    name="Domain Selector",
-    model="gpt-5-mini",
-    instructions=_DOMAIN_SELECTOR_INSTRUCTIONS,
-    output_type=DomainSelection,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(effort="minimal", summary="auto"),
-    ),
-)
-
-_QUERY_CREATOR_INSTRUCTIONS = """
-You are a SQL query planner.
-Given a natural-language analytics question and the available data domain, produce:
-  - query: a readable, executable SQL query (use standard SQL syntax).
-  - explanation: a one-sentence plain-English description of what the query does.
-
-Use only tables and columns that are plausible for the domain.
-Do not execute the query — just produce the plan.
-"""
-
-_query_creator = Agent(
-    name="Query Creator",
-    model="gpt-5-mini",
-    instructions=_QUERY_CREATOR_INSTRUCTIONS,
-    output_type=QueryPlan,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(effort="low", summary="auto"),
-    ),
-)
-
-_EXECUTOR_INSTRUCTIONS = """
-You are a query result simulator.
-Given a SQL query and its description, return realistic-looking dummy data as a markdown table.
-The data must be consistent with an active business (not null or empty).
-Include at least 3–5 rows. Add a brief summary line above the table.
-"""
-
-_query_executor = Agent(
-    name="Query Executor",
-    model="gpt-5-mini",
-    instructions=_EXECUTOR_INSTRUCTIONS,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(effort="low", summary="auto"),
-    ),
-)
-
-_SYNTHESISER_INSTRUCTIONS = """
-You are a business analyst reporting results to a stakeholder.
-Given the query results (a markdown table), write a concise, insight-driven summary:
-- Start with the key finding in one sentence.
-- Use bullet points to highlight notable numbers or trends.
-- End with a short actionable observation if appropriate.
-Answer in the same language the user used.
-"""
-
-_synthesiser = Agent(
-    name="Data Synthesiser",
-    model="gpt-5-mini",
-    instructions=_SYNTHESISER_INSTRUCTIONS,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(effort="low", summary="auto"),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Workflow
-# ---------------------------------------------------------------------------
 
 async def run_structured_qa(
     conversation: list,
     rewritten_query: str,
 ) -> AsyncGenerator[str, None]:
-    log.info("structured_qa.start", rewritten_query=rewritten_query)
-    # 1. Domain selection
-    domain_result = await Runner.run(
-        _domain_selector,
-        [*conversation, {"role": "user", "content": [{"type": "input_text", "text": rewritten_query}]}],
+    config = load_config()
+    adapter = build_adapter(config)
+    log.info(
+        "structured_qa.request.received",
+        mode=config.mode,
+        data_source=adapter.data_source,
+        conversation_messages=len(conversation),
     )
-    domain = domain_result.final_output.domain
-    log.info("structured_qa.domain_selected", domain=domain)
 
-    if domain == "other":
-        log.warning("structured_qa.domain_unknown", rewritten_query=rewritten_query)
-        yield (
-            "La domanda non sembra riguardare i dati strutturati disponibili (commerce o personnel). "
-            "Prova a riformulare la richiesta specificando il tipo di dati che ti interessa."
-        )
+    intent = await plan_structured_qa(rewritten_query)
+    log.info(
+        "structured_qa.intent.detected",
+        tool_name=intent.tool_name.value if intent.tool_name else None,
+        requires_clarification=intent.requires_clarification,
+        unsupported_request=intent.unsupported_request,
+    )
+
+    if intent.unsupported_request:
+        response = unsupported_response(adapter.data_source)
+        log.info("structured_qa.response.generated", status="unsupported")
+        yield _render_response(response)
         return
 
-    # 2. Query creation
-    query_input = (
-        f"Domain: {domain}\n"
-        f"Question: {rewritten_query}"
-    )
-    query_result = await Runner.run(
-        _query_creator,
-        [{"role": "user", "content": [{"type": "input_text", "text": query_input}]}],
-    )
-    plan = query_result.final_output
-    log.info("structured_qa.query_plan", sql=plan.query, explanation=plan.explanation)
+    if intent.requires_clarification:
+        response = clarification_response(
+            adapter.data_source,
+            intent.clarification_message,
+            intent.parameters,
+        )
+        log.info("structured_qa.response.generated", status="clarification")
+        yield _render_response(response)
+        return
 
-    # 3. Query execution (simulation)
-    exec_input = (
-        f"SQL query:\n```sql\n{plan.query}\n```\n\n"
-        f"Description: {plan.explanation}"
-    )
-    exec_result = await Runner.run(
-        _query_executor,
-        [{"role": "user", "content": [{"type": "input_text", "text": exec_input}]}],
-    )
-    raw_data = str(exec_result.final_output)
-    log.debug("structured_qa.raw_data_preview", preview=raw_data[:200])
+    try:
+        call = validate_tool_call(intent, config)
+    except StructuredQaToolNotAllowedError:
+        response = unsupported_response(adapter.data_source)
+        log.warning("structured_qa.tool_selected", allowed=False)
+        log.info("structured_qa.response.generated", status="tool_not_allowed")
+        yield _render_response(response)
+        return
+    except StructuredQaValidationError as exc:
+        response = validation_error_response(adapter.data_source, str(exc), intent.parameters)
+        log.warning("structured_qa.tool_selected", allowed=False, reason=str(exc))
+        log.info("structured_qa.response.generated", status="validation_error")
+        yield _render_response(response)
+        return
 
-    # 4. Synthesis — streamed
-    synth_input = (
-        f"Original question: {rewritten_query}\n\n"
-        f"Query: {plan.query}\n\n"
-        f"Results:\n{raw_data}"
+    log.info(
+        "structured_qa.tool_selected",
+        tool_name=call.name.value,
+        allowed=True,
+        parameter_keys=list(call.parameters.model_dump(by_alias=True, exclude_none=True).keys()),
     )
-    log.info("structured_qa.synthesising")
-    streamed = Runner.run_streamed(
-        _synthesiser,
-        [*conversation, {"role": "user", "content": [{"type": "input_text", "text": synth_input}]}],
+
+    try:
+        log.info(
+            "structured_qa.adapter.called",
+            tool_name=call.name.value,
+            data_source=adapter.data_source,
+            mock=adapter.data_source == "mock_db",
+        )
+        result = await adapter.call_tool(call)
+        log.info(
+            "structured_qa.adapter.completed",
+            tool_name=call.name.value,
+            data_source=adapter.data_source,
+            row_count=len(result.rows),
+            mock=result.metadata.get("mock") is True,
+        )
+    except StructuredQaAdapterError as exc:
+        log.error(
+            "structured_qa.adapter.failed",
+            tool_name=call.name.value,
+            data_source=adapter.data_source,
+            error_type=type(exc).__name__,
+        )
+        response = adapter_error_response(adapter.data_source, call)
+        log.info("structured_qa.response.generated", status="adapter_error")
+        yield _render_response(response)
+        return
+
+    response = success_response(adapter.data_source, call, result, rewritten_query)
+    log.info(
+        "structured_qa.response.generated",
+        status="empty" if not result.rows else "success",
+        data_source=adapter.data_source,
     )
-    async for event in streamed.stream_events():
-        if not isinstance(event, RawResponsesStreamEvent):
-            continue
-        raw = event.data
-        if getattr(raw, "type", None) == "response.output_text.delta":
-            delta = getattr(raw, "delta", "")
-            if delta:
-                yield delta
+    yield _render_response(response)

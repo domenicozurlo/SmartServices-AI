@@ -54,12 +54,45 @@ services:
       - DOC_KB_MODEL=${DOC_KB_MODEL:-gpt-5-mini}
       - DOC_KB_INCLUDE_REASONING=${DOC_KB_INCLUDE_REASONING:-false}
       - GOOGLE_CALENDAR_MCP_URL=http://google-calendar-mcp:3000
+      - STRUCTURED_QA_MODE=${STRUCTURED_QA_MODE:-mock_db}
+      - STRUCTURED_QA_OUTPUT_FORMAT=${STRUCTURED_QA_OUTPUT_FORMAT:-text}
+      - STRUCTURED_QA_PLANNER_MODE=${STRUCTURED_QA_PLANNER_MODE:-llm}
+      - STRUCTURED_QA_PLANNER_MODEL=${STRUCTURED_QA_PLANNER_MODEL:-gpt-5-mini}
+      - MCP_STRUCTURED_QA_URL=${MCP_STRUCTURED_QA_URL:-http://structured-qa-toolbox:5000/mcp/senshistory_readonly}
+      - MCP_STRUCTURED_QA_TOOLSET=${MCP_STRUCTURED_QA_TOOLSET:-senshistory_readonly}
+      - MCP_STRUCTURED_QA_TIMEOUT_SECONDS=${MCP_STRUCTURED_QA_TIMEOUT_SECONDS:-15}
+      - MCP_STRUCTURED_QA_ENABLED=${MCP_STRUCTURED_QA_ENABLED:-false}
+      - MCP_STRUCTURED_QA_ALLOWED_TOOLS=${MCP_STRUCTURED_QA_ALLOWED_TOOLS:-get_latest_sensor_readings,get_sensor_readings_by_period,get_daily_temperature_humidity,get_soil_moisture_summary,get_battery_status,get_rf_signal_status,get_ph_ec_trend,get_daily_rain_et,get_data_quality_summary}
     restart: always
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+# Google MCP Toolbox for Databases - Structured QA / MySQL senshistory toolset
+# Start only when needed:
+#   docker compose --profile mcp up -d structured-qa-toolbox agents-gateway
+  structured-qa-toolbox:
+    image: us-central1-docker.pkg.dev/database-toolbox/toolbox/toolbox:${MCP_TOOLBOX_VERSION:-1.4.0}
+    container_name: structured-qa-toolbox
+    profiles:
+      - mcp
+    command: ["--config", "/app/tools.yaml"]
+    ports:
+      - "5000:5000"
+    environment:
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-irrifarm_ai}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - type: bind
+        source: ./agents-gateway/toolbox/senshistory_tools.yaml
+        target: /app/tools.yaml
+        read_only: true
+    restart: unless-stopped
 
 # EXPOSE pgvector port so pgvector-explorer can connect from the host
   vectordb:
